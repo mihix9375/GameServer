@@ -26,12 +26,12 @@ impl GameService for GameLauncherServer
 		net::game_version_checker::handle_check_version(request).await
     }
 
-	type DownloadGameStream = tonic::codegen::tokio_stream::wrappers::ReceiverStream<Result<GameData, Status>>;
+	type DownloadGameStream = net::game_distributor::DownloadStream;
 	async fn download_game(
 		&self,
 		request: Request<DownloadRequest>,
 	) -> Result<Response<Self::DownloadGameStream>, Status> {
-		todo!()
+		net::game_distributor::handle_game_distributor(request).await
 	}
 
 	type WaitUpdateStream = tonic::codegen::tokio_stream::wrappers::ReceiverStream<Result<UpdateNotice, Status>>;

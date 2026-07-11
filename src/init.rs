@@ -1,8 +1,7 @@
-use std::fs;
-use std::io::Read;
-use std::path::PathBuf;
-use zip::ZipArchive;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::env;
+use ripunzip::UnzipOptions;
 use serde_json::{Map, Value};
 use serde::{
 	Deserialize, Serialize
@@ -54,6 +53,70 @@ pub fn create_dirs()
 	extract_games(root.to_path_buf(), games);
 }
 
+struct MetaFilter {}
+impl ripunzip::FilenameFilter for MetaFilter {
+	fn should_unzip(&self, filename: &str) -> bool {
+		Path::new(filename)
+			.file_name()
+			.map(|name| name == "meta.json")
+			.unwrap_or(false)
+	}
+}
+
+fn unzip_meta<S: AsRef<Path>, D: AsRef<Path>>(src: S, dir: D) -> Result<(), String> {
+	let file = File::open(src).map_err(|e| e.to_string())?;
+	let zip = ripunzip::UnzipEngine::for_file(file).map_err(|e| e.to_string())?;
+	zip.unzip(UnzipOptions {
+		output_directory: Some(dir.as_ref().into()),
+		password: None,
+		single_threaded: false,
+		filename_filter: Some(Box::new(MetaFilter {})),
+		progress_reporter: Box::new(ripunzip::NullProgressReporter {}),
+	}).map_err(|e| e.to_string())?;
+
+	Ok(())
+}
+
+fn find_meta_file(dir: &Path) -> Option<PathBuf> {
+	if let Ok(entries) = fs::read_dir(dir) {
+		for entry in entries.flatten() {
+			let path = entry.path();
+			if path.is_file() && path.file_name() == Some(std::ffi::OsStr::new("meta.json")) {
+				return Some(path);
+			} else if path.is_dir() {
+				if let Some(found) = find_meta_file(&path) {
+					return Some(found);
+				}
+			}
+		}
+	}
+	None
+}
+
+fn update_zip_with_new_meta(src_zip: &Path, dst_zip: &Path, new_meta_content: &str) -> Result<(), String> {
+	use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
+	use std::io::Write;
+
+	let src_file = File::open(src_zip).map_err(|e| e.to_string())?;
+	let mut archive = ZipArchive::new(src_file).map_err(|e| e.to_string())?;
+
+	let dst_file = File::create(dst_zip).map_err(|e| e.to_string())?;
+	let mut writer = ZipWriter::new(dst_file);
+
+	for i in 0..archive.len() {
+		let file = archive.by_index(i).map_err(|e| e.to_string())?;
+		let name = file.name().to_string();
+		if Path::new(&name).file_name() == Some(std::ffi::OsStr::new("meta.json")) {
+			writer.start_file(&name, SimpleFileOptions::default()).map_err(|e| e.to_string())?;
+			writer.write_all(new_meta_content.as_bytes()).map_err(|e| e.to_string())?;
+		} else {
+			writer.raw_copy_file(file).map_err(|e| e.to_string())?;
+		}
+	}
+	writer.finish().map_err(|e| e.to_string())?;
+	Ok(())
+}
+
 fn extract_games(root: PathBuf, gamespath: PathBuf)
 {
 	let temp_path = root.join("temp");
@@ -76,49 +139,24 @@ fn extract_games(root: PathBuf, gamespath: PathBuf)
 			continue;
 		}
 
-		let content =
-		{
-			let zip_file = match fs::File::open(&zip_path)
-			{
-				Ok(f) => f,
-				Err(_) => continue,
-			};
-			let mut archive = match ZipArchive::new(zip_file)
-			{
-				Ok(a) => a,
-				Err(_) => continue,
-			};
+		let content = {
+			let timestamp = std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos())
+				.unwrap_or(0);
+			let temp_dir = env::temp_dir().join(format!("gamelauncher_meta_{}_{}", std::process::id(), timestamp));
+			let _ = fs::create_dir_all(&temp_dir);
 
-			let mut meta_index = None;
-			for i in 0..archive.len()
-			{
-				if let Ok(file) = archive.by_index(i)
-				{
-					if file.name() == "meta.json" || file.name().ends_with("/meta.json") || file.name().ends_with("\\meta.json")
-					{
-						meta_index = Some(i);
-						break;
-					}
-				}
-			}
-
-			let match_index = match meta_index
-			{
-				Some(i) => i,
+			let res = if unzip_meta(&zip_path, &temp_dir).is_ok() {
+				find_meta_file(&temp_dir).and_then(|path| fs::read_to_string(path).ok())
+			} else {
+				None
+			};
+			let _ = fs::remove_dir_all(&temp_dir);
+			match res {
+				Some(buf) => buf,
 				None => continue,
-			};
-			let mut meta_file = match archive.by_index(match_index)
-			{
-				Ok(f) => f,
-				Err(_) => continue,
-			};
-
-			let mut buf = String::new();
-			if meta_file.read_to_string(&mut buf).is_err()
-			{
-				continue;
 			}
-			buf
 		};
 
 		let meta = match serde_json::from_str::<Meta>(&content)
@@ -136,9 +174,13 @@ fn extract_games(root: PathBuf, gamespath: PathBuf)
 		let meta_path = game_dir.join("meta.json");
 		let json_str = serde_json::to_string_pretty(&meta).expect("Couldnt create json string");
 
-		fs::write(&meta_path, json_str).expect("Couldnt write meta.json");
+		fs::write(&meta_path, &json_str).expect("Couldnt write meta.json");
 
 		let new_zip_path = game_dir.join(entry.file_name());
-		fs::copy(&zip_path, &new_zip_path).expect("Couldnt copy zip file");
+		if let Err(e) = update_zip_with_new_meta(&zip_path, &new_zip_path, &json_str) {
+			eprintln!("Could not update meta.json inside zip, falling back to copy: {}", e);
+			let _ = fs::copy(&zip_path, &new_zip_path);
+		}
+		let _ = fs::remove_file(&zip_path);
 	}
 }
