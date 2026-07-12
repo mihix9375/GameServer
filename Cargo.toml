@@ -3,5 +3,19 @@ name = "Server"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
 [dependencies]
+main = "0.1.0"
+prost = "0.14.3"
+protobuf = "3.7.2"
+protoc = "2.28.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "fs"] }
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+zip = "8.6.0"
+ripunzip = "2.0.3"
 
