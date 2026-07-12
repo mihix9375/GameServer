@@ -8,9 +8,7 @@ use crate::gamelauncher::{
 };
 use std::env;
 use std::fs;
-use std::path::{
-	Path, PathBuf
-};
+use std::path::PathBuf;
 use serde_json;
 use crate::init::Meta;
 use std::ffi::OsStr;
@@ -26,9 +24,35 @@ pub async fn handle_game_distributor(request: Request<DownloadRequest>) -> Resul
 	let (tx, rx)	= tokio::sync::mpsc::channel(128);
 
 	let req 		= request.into_inner();
-
 	println!("game id: {}", req.game_id);
-	let target_path = game_path.join(req.game_id);
+
+	let clean_id = req.game_id.trim_end_matches(".exe");
+	let mut target_path = game_path.join(clean_id);
+	if !target_path.exists() || !target_path.is_dir() {
+		let raw_path = game_path.join(&req.game_id);
+		if raw_path.exists() && raw_path.is_dir() {
+			target_path = raw_path;
+		} else if let Ok(entries) = fs::read_dir(&game_path) {
+			for entry in entries.flatten() {
+				let p = entry.path();
+				if p.is_dir() {
+					if entry.file_name() == OsStr::new(clean_id) || entry.file_name() == OsStr::new(&req.game_id) {
+						target_path = p;
+						break;
+					}
+					let meta_file = p.join("meta.json");
+					if let Ok(c) = fs::read_to_string(&meta_file) {
+						if let Ok(m) = serde_json::from_str::<Meta>(&c) {
+							if m.id == req.game_id || m.id == clean_id || m.game == req.game_id || m.game == clean_id {
+								target_path = p;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	
 	let _ = search_game(target_path.clone()).await;
 
@@ -38,7 +62,7 @@ pub async fn handle_game_distributor(request: Request<DownloadRequest>) -> Resul
 		let entry 	= entry?;
 		let path 	= entry.path();
 
-		if (path.is_file() && path.file_name() != Some(OsStr::new("meta.json"))) 
+		if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("zip")
 		{
 			zip_path = Some(path);
 			break;
@@ -60,10 +84,10 @@ pub async fn handle_game_distributor(request: Request<DownloadRequest>) -> Resul
 		let mut buffer	= vec![0u8; 1024 * 128];
 		let mut index 	= 0;
 
-		while (true)
+		loop
 		{
 			let bytes_read = file.read(&mut buffer).await.expect("Couldnt read zip file");
-			if (bytes_read == 0) { break; };
+			if bytes_read == 0  { break; };
 	
 			let chunk = GameData
 			{

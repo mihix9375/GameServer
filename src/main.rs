@@ -7,14 +7,19 @@ pub mod gamelauncher
 
 use gamelauncher::game_service_server::{GameService, GameServiceServer};
 use gamelauncher::{
-	DownloadRequest, GameData, Identificial, UpdateNotice, VersionRequest, VersionResponse,
+	DownloadRequest, Identificial, UpdateNotice, VersionRequest, VersionResponse,
 };
 
 mod net;
 mod init;
+mod src;
 
-#[derive(Default)]
-pub struct GameLauncherServer {}
+use crate::src::spawn_monitor;
+
+#[derive(Clone)]
+pub struct GameLauncherServer {
+	pub shared_tx: std::sync::Arc<tokio::sync::broadcast::Sender<UpdateNotice>>,
+}
 
 #[tonic::async_trait]
 impl GameService for GameLauncherServer
@@ -39,24 +44,45 @@ impl GameService for GameLauncherServer
 		&self,
 		request: Request<Identificial>,
 	) -> Result<Response<Self::WaitUpdateStream>, Status> {
-		todo!()
+		net::update_notice::send_update_notice(request, &self.shared_tx).await
 	}
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> 
 {
-    init::create_dirs();
+    init::init();
 
-    let addr 	= "[::1]:50050".parse()?;
-	let server 	= GameLauncherServer::default();
+	let shared_tx = spawn_monitor::spawn_monitor();
+	let server 	= GameLauncherServer { shared_tx };
 
-	println!("Server Start. Listening On {}", addr);
+	let addr_v4 = "0.0.0.0:50050".parse()?;
+	let addr_v6 = "[::]:50050".parse()?;
 
-	Server::builder()
-		.add_service(GameServiceServer::new(server))
-		.serve(addr)
-		.await?;
+	println!("GameLauncher Server listening on {} and {}", addr_v4, addr_v6);
 
+	let server_v4 = server.clone();
+	let handle_v4 = tokio::spawn(async move {
+		if let Err(e) = Server::builder()
+			.add_service(GameServiceServer::new(server_v4))
+			.serve(addr_v4)
+			.await
+		{
+			eprintln!("IPv4 server error: {}", e);
+		}
+	});
+
+	let server_v6 = server.clone();
+	let handle_v6 = tokio::spawn(async move {
+		if let Err(e) = Server::builder()
+			.add_service(GameServiceServer::new(server_v6))
+			.serve(addr_v6)
+			.await
+		{
+			eprintln!("IPv6 server error: {}", e);
+		}
+	});
+
+	let _ = tokio::join!(handle_v4, handle_v6);
 	Ok(())
 }
