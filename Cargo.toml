@@ -1,6 +1,6 @@
 [package]
 name = "Server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [build-dependencies]
@@ -18,4 +18,5 @@ tonic = "0.14.6"
 tonic-prost = "0.14.6"
 zip = "8.6.0"
 ripunzip = "2.0.3"
+encoding_rs = "0.8"
 

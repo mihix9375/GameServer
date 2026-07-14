@@ -8,35 +8,65 @@ use crate::src::{
 	extract_games
 };
 
-fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+fn any_to_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
 	D: serde::Deserializer<'de>,
-	T: Default + Deserialize<'de>,
 {
-	let opt = Option::<T>::deserialize(deserializer)?;
-	Ok(opt.unwrap_or_default())
+	let val = Option::<Value>::deserialize(deserializer)?;
+	match val
+	{
+		Some(Value::String(s)) => Ok(s),
+		Some(Value::Number(n)) => Ok(n.to_string()),
+		Some(Value::Bool(b)) => Ok(b.to_string()),
+		_ => Ok(String::new()),
+	}
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+fn any_to_vec_string<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+{
+	let val = Option::<Value>::deserialize(deserializer)?;
+	match val
+	{
+		Some(Value::Array(arr)) => {
+			let mut res = Vec::new();
+			for item in arr
+			{
+				match item
+				{
+					Value::String(s) => res.push(s),
+					Value::Number(n) => res.push(n.to_string()),
+					Value::Bool(b) => res.push(b.to_string()),
+					_ => {}
+				}
+			}
+			Ok(res)
+		}
+		_ => Ok(Vec::new()),
+	}
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 pub struct Meta
 {
-	#[serde(default, deserialize_with = "null_to_default")]
+	#[serde(default, deserialize_with = "any_to_string")]
 	pub id: String,
-	#[serde(default, deserialize_with = "null_to_default")]
+	#[serde(default, deserialize_with = "any_to_string")]
 	pub title: String,
-	#[serde(default, deserialize_with = "null_to_default")]
+	#[serde(default, deserialize_with = "any_to_string")]
 	pub author: String,
-	#[serde(rename = "titleImage", alias = "title_image", alias = "TitleImage", alias = "image", alias = "imgName", default, deserialize_with = "null_to_default")]
+	#[serde(rename = "titleImage", alias = "title_image", alias = "TitleImage", alias = "image", alias = "imgName", default, deserialize_with = "any_to_string")]
 	pub title_image: String,
-	#[serde(default, deserialize_with = "null_to_default")]
+	#[serde(default, deserialize_with = "any_to_vec_string")]
 	pub tags: Vec<String>,
-	#[serde(rename = "game", alias = "exeName", alias = "exe", alias = "gameExe", default, deserialize_with = "null_to_default")]
+	#[serde(rename = "game", alias = "exeName", alias = "exe", alias = "gameExe", default, deserialize_with = "any_to_string")]
 	pub game: String,
-	#[serde(default, deserialize_with = "null_to_default")]
+	#[serde(default, deserialize_with = "any_to_string")]
 	pub version: String,
-	#[serde(rename = "latestUpdate", alias = "lastUpdate", alias = "latest_update", default, deserialize_with = "null_to_default")]
+	#[serde(rename = "latestUpdate", alias = "lastUpdate", alias = "latest_update", default, deserialize_with = "any_to_string")]
 	pub latest_update: String,
-	#[serde(default, deserialize_with = "null_to_default")]
+	#[serde(default, deserialize_with = "any_to_string")]
 	pub description: String,
 	
 	#[serde(flatten, skip_serializing)]
