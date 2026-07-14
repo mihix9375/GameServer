@@ -28,10 +28,14 @@ pub fn spawn_monitor() -> Arc<broadcast::Sender<UpdateNotice>>
 		{
 			extract_games::extract_games(monitor_root.clone(), monitor_games.clone());
 
-			if let Ok(content) = fs::read_to_string(&games_list_path) {
-				if let Ok(meta) = serde_json::from_str::<Vec<Meta>>(&content) {
-					if meta != meta_cache {
-						for game_meta in &meta {
+			if let Ok(content) = fs::read_to_string(&games_list_path)
+			{
+				if let Ok(meta) = serde_json::from_str::<Vec<Meta>>(&content)
+				{
+					if meta != meta_cache
+					{
+						for game_meta in &meta
+						{
 							let clean_id = if !game_meta.id.is_empty() { game_meta.id.trim_end_matches(".exe").to_string() } else { game_meta.game.trim_end_matches(".exe").to_string() };
 							let _ = monitor_tx.send(UpdateNotice {
 								game_id: clean_id,
