@@ -27,15 +27,17 @@ impl GameService for GameLauncherServer
 	async fn check_version(
 		&self,
 		request: Request<VersionRequest>,
-	) -> Result<Response<VersionResponse>, Status> {
+	) -> Result<Response<VersionResponse>, Status>
+	{
 		net::game_version_checker::handle_check_version(request).await
-    }
+	}
 
 	type DownloadGameStream = net::game_distributor::DownloadStream;
 	async fn download_game(
 		&self,
 		request: Request<DownloadRequest>,
-	) -> Result<Response<Self::DownloadGameStream>, Status> {
+	) -> Result<Response<Self::DownloadGameStream>, Status>
+	{
 		net::game_distributor::handle_game_distributor(request).await
 	}
 
@@ -43,7 +45,8 @@ impl GameService for GameLauncherServer
 	async fn wait_update(
 		&self,
 		request: Request<Identificial>,
-	) -> Result<Response<Self::WaitUpdateStream>, Status> {
+	) -> Result<Response<Self::WaitUpdateStream>, Status>
+	{
 		net::update_notice::send_update_notice(request, &self.shared_tx).await
 	}
 }
@@ -51,7 +54,7 @@ impl GameService for GameLauncherServer
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> 
 {
-    init::init();
+	init::init();
 
 	let shared_tx = spawn_monitor::spawn_monitor();
 	let server 	= GameLauncherServer { shared_tx };
@@ -64,6 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>
 	let server_v4 = server.clone();
 	let handle_v4 = tokio::spawn(async move {
 		if let Err(e) = Server::builder()
+			.initial_stream_window_size(Some(1024 * 1024 * 16))
+			.initial_connection_window_size(Some(1024 * 1024 * 32))
+			.tcp_nodelay(true)
 			.add_service(GameServiceServer::new(server_v4))
 			.serve(addr_v4)
 			.await
@@ -75,6 +81,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>
 	let server_v6 = server.clone();
 	let handle_v6 = tokio::spawn(async move {
 		if let Err(e) = Server::builder()
+			.initial_stream_window_size(Some(1024 * 1024 * 16))
+			.initial_connection_window_size(Some(1024 * 1024 * 32))
+			.tcp_nodelay(true)
 			.add_service(GameServiceServer::new(server_v6))
 			.serve(addr_v6)
 			.await
