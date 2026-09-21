@@ -26,7 +26,8 @@ pub async fn send_update_notice(
 				if let Ok(content) = std::fs::read_to_string(&games_json) {
 					if let Ok(metas) = serde_json::from_str::<Vec<crate::init::Meta>>(&content) {
 						for meta in metas {
-							let clean_id = if !meta.id.is_empty() { meta.id.trim_end_matches(".exe").to_string() } else { meta.game.trim_end_matches(".exe").to_string() };
+							let raw_id = if !meta.id.is_empty() { &meta.id } else { &meta.game };
+							let Ok(clean_id) = crate::net::normalize_game_id(raw_id) else { continue; };
 							let notice = UpdateNotice {
 								game_id: clean_id,
 								version: meta.version.clone(),

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GameLauncher Server Console</title>
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">GL</div>
+        <div><strong>Server Console</strong><small>GameLauncher Admin</small></div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-view="dashboard"><span>▦</span>ダッシュボード</button>
+        <button class="nav-item" data-view="games"><span>◈</span>配布ゲーム</button>
+        <button class="nav-item" data-view="comments"><span>◌</span>コメント管理</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot"></span><span id="sidebar-status">確認中...</span>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">ADMINISTRATION</p><h1 id="page-title">ダッシュボード</h1></div>
+        <div class="top-actions">
+          <input id="game-upload-input" type="file" accept=".zip,application/zip" hidden>
+          <button id="upload-game" class="button secondary">ZIPをアップロード</button>
+          <button id="refresh-all" class="button secondary">再読込</button>
+          <button id="rescan" class="button primary">ゲームを再スキャン</button>
+        </div>
+      </header>
+
+      <section id="view-dashboard" class="view active">
+        <div class="metric-grid">
+          <article class="metric"><span>サーバー</span><strong class="online">ONLINE</strong><small id="uptime">稼働時間 --</small></article>
+          <article class="metric"><span>配布ゲーム</span><strong id="game-count">--</strong><small>登録タイトル</small></article>
+          <article class="metric"><span>コメント</span><strong id="comment-count">--</strong><small>保存済み</small></article>
+          <article class="metric"><span>管理画面</span><strong id="access-mode">LOCAL</strong><small id="admin-address">--</small></article>
+        </div>
+        <div class="panel-grid">
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">ENDPOINTS</p><h2>接続情報</h2></div></div>
+            <dl class="details">
+              <div><dt>gRPC IPv4</dt><dd id="grpc-v4">--</dd></div>
+              <div><dt>gRPC IPv6</dt><dd id="grpc-v6">--</dd></div>
+              <div><dt>ゲーム保存先</dt><dd id="games-directory">--</dd></div>
+              <div><dt>コメント保存先</dt><dd id="comments-file">--</dd></div>
+            </dl>
+          </article>
+          <article class="panel">
+            <div class="panel-head"><div><p class="eyebrow">ACTIVITY</p><h2>操作ログ</h2></div></div>
+            <div id="activity-log" class="activity-log"><p><time>--:--:--</time> 管理画面を読み込んでいます</p></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-games" class="view">
+        <article class="panel full">
+          <div class="panel-head"><div><p class="eyebrow">DISTRIBUTION</p><h2>配布ゲーム</h2></div><input id="game-search" class="search" placeholder="タイトル・IDで検索"></div>
+          <div id="games-list" class="game-list"><p class="empty">読み込んでいます...</p></div>
+        </article>
+      </section>
+
+      <section id="view-comments" class="view">
+        <article class="panel full">
+          <div class="panel-head"><div><p class="eyebrow">MODERATION</p><h2>コメント管理</h2></div><input id="comment-search" class="search" placeholder="ゲーム・名前・本文で検索"></div>
+          <div id="comments-list" class="comments-list"><p class="empty">読み込んでいます...</p></div>
+        </article>
+      </section>
+    </main>
+  </div>
+
+  <div id="login" class="login hidden">
+    <form id="login-form" class="login-card">
+      <div class="brand-mark">GL</div>
+      <p class="eyebrow">REMOTE ACCESS</p>
+      <h2>管理トークンを入力</h2>
+      <p>このServerの管理画面へアクセスするには認証が必要です。</p>
+      <input id="token" type="password" autocomplete="current-password" placeholder="管理トークン" required>
+      <button class="button primary" type="submit">接続する</button>
+      <small id="login-error"></small>
+    </form>
+  </div>
+  <div id="edit-modal" class="dialog hidden">
+    <form id="edit-form" class="dialog-card">
+      <div class="dialog-head">
+        <div><p class="eyebrow">GAME METADATA</p><h2 id="edit-heading">ゲーム情報を編集</h2></div>
+        <button id="close-edit" class="icon-button" type="button" aria-label="閉じる">×</button>
+      </div>
+      <input id="edit-id" type="hidden">
+      <div class="form-grid">
+        <label><span>タイトル *</span><input id="edit-title" required maxlength="120"></label>
+        <label><span>バージョン *</span><input id="edit-version" required placeholder="1.0.0"></label>
+        <label><span>作者</span><input id="edit-author" maxlength="120"></label>
+        <label><span>更新日</span><input id="edit-date" placeholder="2026/09/21"></label>
+        <label class="wide"><span>タグ（カンマ区切り）</span><input id="edit-tags"></label>
+        <label class="wide"><span>説明</span><textarea id="edit-description" rows="5"></textarea></label>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancel-edit" class="button secondary" type="button">キャンセル</button>
+        <button id="save-edit" class="button primary" type="submit">変更を保存</button>
+      </div>
+    </form>
+  </div>
+  <div id="toast" class="toast"></div>
+</body>
+</html>
