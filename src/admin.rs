@@ -37,7 +37,11 @@ impl Default for AdminConfig
 {
 	fn default() -> Self
 	{
-		Self { bind: default_bind(), token: String::new(), leaderboard_bind: default_leaderboard_bind() }
+		Self {
+			bind: default_bind(),
+			token: String::new(),
+			leaderboard_bind: default_leaderboard_bind(),
+		}
 	}
 }
 
@@ -122,6 +126,14 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
 	(status, Json(ActionResponse { ok: false, message: message.into() }))
 }
 
+fn existing_game_id(state: &AdminState, game_id: &str) -> Result<String, (StatusCode, Json<ActionResponse>)>
+{
+	let game_id = crate::net::normalize_game_id(game_id)
+		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.message().to_string()))?;
+	find_game_directory(&state.root, &game_id)?;
+	Ok(game_id)
+}
+
 fn authorize(state: &AdminState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ActionResponse>)>
 {
 	if state.token.is_empty()
@@ -200,9 +212,7 @@ async fn get_leaderboards(
 ) -> ApiResult<Vec<crate::leaderboards::BoardDefinition>>
 {
 	authorize(&state, &headers)?;
-	let clean_id = crate::net::normalize_game_id(&game_id)
-		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.message().to_string()))?;
-	find_game_directory(&state.root, &clean_id)?;
+	let clean_id = existing_game_id(&state, &game_id)?;
 	Ok(Json(state.leaderboards.definitions(&clean_id).await))
 }
 
@@ -214,9 +224,7 @@ async fn update_leaderboards(
 ) -> ApiResult<ActionResponse>
 {
 	authorize(&state, &headers)?;
-	let clean_id = crate::net::normalize_game_id(&game_id)
-		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.message().to_string()))?;
-	find_game_directory(&state.root, &clean_id)?;
+	let clean_id = existing_game_id(&state, &game_id)?;
 	state.leaderboards.configure(&clean_id, update.leaderboards).await
 		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
 	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}のランキング設定を保存しました") }))

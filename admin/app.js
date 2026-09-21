@@ -167,8 +167,14 @@ function rankingField(index, board = {}) {
   field.querySelector('[data-role="id"]').value = board.id || "";
   field.querySelector('[data-role="name"]').value = board.name || "";
   field.querySelector('[data-role="order"]').value = board.order || "high_score";
-  const sync = () => controls.forEach((control) => { control.disabled = !enabled.checked; });
-  enabled.addEventListener("change", sync); sync();
+
+  const syncEnabledState = () => {
+    for (const control of controls) {
+      control.disabled = !enabled.checked;
+    }
+  };
+  enabled.addEventListener("change", syncEnabledState);
+  syncEnabledState();
   return field;
 }
 
@@ -178,29 +184,50 @@ async function openRankingEditor(game) {
     const boards = await api(`/api/leaderboards/${encodeURIComponent(id)}`);
     $("#ranking-game-id").value = id;
     $("#ranking-heading").textContent = `${game.title || id} のランキング`;
-    const fields = $("#ranking-fields"); fields.replaceChildren(rankingField(0, boards[0]), rankingField(1, boards[1]));
+    const fields = $("#ranking-fields");
+    fields.replaceChildren(rankingField(0, boards[0]), rankingField(1, boards[1]));
     $("#ranking-modal").classList.remove("hidden");
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
-function closeRankingEditor() { $("#ranking-modal").classList.add("hidden"); }
+function closeRankingEditor() {
+  $("#ranking-modal").classList.add("hidden");
+}
+
+function readRankingField(field) {
+  return {
+    id: field.querySelector('[data-role="id"]').value.trim(),
+    name: field.querySelector('[data-role="name"]').value.trim(),
+    order: field.querySelector('[data-role="order"]').value,
+  };
+}
 
 async function saveRankings(event) {
   event.preventDefault();
   const id = $("#ranking-game-id").value;
-  const leaderboards = $$(".ranking-field").filter((field) => field.querySelector('[data-role="enabled"]').checked).map((field) => ({
-    id: field.querySelector('[data-role="id"]').value.trim(),
-    name: field.querySelector('[data-role="name"]').value.trim(),
-    order: field.querySelector('[data-role="order"]').value,
-  }));
-  const button = $("#save-ranking"); button.disabled = true;
+  const leaderboards = $$(".ranking-field")
+    .filter((field) => field.querySelector('[data-role="enabled"]').checked)
+    .map(readRankingField);
+  const button = $("#save-ranking");
+  button.disabled = true;
+
   try {
     const result = await api(`/api/leaderboards/${encodeURIComponent(id)}`, {
-      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ leaderboards }),
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leaderboards }),
     });
-    closeRankingEditor(); toast(result.message); log(result.message);
-  } catch (error) { toast(error.message, true); log(`ランキング設定失敗: ${error.message}`); }
-  finally { button.disabled = false; }
+    closeRankingEditor();
+    toast(result.message);
+    log(result.message);
+  } catch (error) {
+    toast(error.message, true);
+    log(`ランキング設定失敗: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function saveGame(event) {

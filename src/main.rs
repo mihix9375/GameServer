@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use tonic::{transport::Server, Request, Response, Status};
 
 pub mod gamelauncher
@@ -70,30 +72,46 @@ impl GameService for GameLauncherServer
 	}
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> 
+fn executable_root() -> Result<PathBuf, std::io::Error>
 {
-	init::init();
+	let executable = std::env::current_exe()?;
+	executable.parent()
+		.map(Path::to_path_buf)
+		.ok_or_else(|| std::io::Error::other("実行ファイルの場所を取得できません"))
+}
 
-	let shared_tx = spawn_monitor::spawn_monitor();
-	let server 	= GameLauncherServer { shared_tx };
-	let admin_tx = server.shared_tx.clone();
-	let root = std::env::current_exe()?.parent().ok_or("実行ファイルの場所を取得できません")?.to_path_buf();
-	let leaderboard_store = leaderboards::LeaderboardStore::load(&root).await?;
+async fn spawn_http_services(root: &Path, server: &GameLauncherServer) -> Result<(), String>
+{
+	let leaderboard_store = leaderboards::LeaderboardStore::load(root).await?;
+	let leaderboard_bind = admin::leaderboard_bind(root)?;
+
+	let admin_updates = server.shared_tx.clone();
 	let admin_leaderboards = leaderboard_store.clone();
 	tokio::spawn(async move {
-		if let Err(error) = admin::serve(admin_tx, admin_leaderboards).await
+		if let Err(error) = admin::serve(admin_updates, admin_leaderboards).await
 		{
 			eprintln!("Admin UI error: {error}");
 		}
 	});
-	let leaderboard_bind = admin::leaderboard_bind(&root)?;
+
 	tokio::spawn(async move {
 		if let Err(error) = leaderboards::serve(leaderboard_store, &leaderboard_bind).await
 		{
 			eprintln!("Leaderboard API error: {error}");
 		}
 	});
+	Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>>
+{
+	init::init();
+
+	let shared_tx = spawn_monitor::spawn_monitor();
+	let server = GameLauncherServer { shared_tx };
+	spawn_http_services(&executable_root()?, &server).await
+		.map_err(std::io::Error::other)?;
 
 	let addr_v4 = "0.0.0.0:50050".parse()?;
 	let addr_v6 = "[::]:50050".parse()?;

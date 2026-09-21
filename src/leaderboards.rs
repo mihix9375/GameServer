@@ -1,17 +1,19 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+mod api;
+
+pub use api::serve;
+
 const MAX_BOARDS: usize = 2;
+const MAX_BOARD_ID_LENGTH: usize = 32;
+const MAX_BOARD_NAME_LENGTH: usize = 40;
+const MAX_PLAYER_NAME_LENGTH: usize = 24;
 const MAX_STORED_ENTRIES: usize = 100;
 const PUBLIC_ENTRY_LIMIT: usize = 10;
 
@@ -80,27 +82,6 @@ pub struct GameLeaderboards
 	pub leaderboards: Vec<PublicBoard>,
 }
 
-#[derive(Debug, Deserialize)]
-struct SubmitScoreRequest
-{
-	player_name: String,
-	score: i64,
-}
-
-#[derive(Debug, Serialize)]
-struct SubmitScoreResponse
-{
-	ok: bool,
-	rank: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse
-{
-	ok: bool,
-	message: String,
-}
-
 #[derive(Clone)]
 pub struct LeaderboardStore
 {
@@ -120,67 +101,81 @@ impl LeaderboardStore
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => LeaderboardData::default(),
 			Err(error) => return Err(format!("leaderboards.jsonを読めません: {error}")),
 		};
-		Ok(Self { path, data: Arc::new(Mutex::new(data)) })
+		Ok(Self {
+			path,
+			data: Arc::new(Mutex::new(data)),
+		})
 	}
 
 	pub async fn get(&self, game_id: &str) -> GameLeaderboards
 	{
 		let data = self.data.lock().await;
-		let leaderboards = data.games.get(game_id).into_iter().flatten()
-			.map(public_board).collect();
-		GameLeaderboards { game_id: game_id.to_string(), leaderboards }
+		let leaderboards = data.games
+			.get(game_id)
+			.into_iter()
+			.flatten()
+			.map(public_board)
+			.collect();
+		GameLeaderboards {
+			game_id: game_id.to_string(),
+			leaderboards,
+		}
 	}
 
 	pub async fn definitions(&self, game_id: &str) -> Vec<BoardDefinition>
 	{
 		let data = self.data.lock().await;
-		data.games.get(game_id).into_iter().flatten()
-			.map(|board| board.definition.clone()).collect()
+		data.games
+			.get(game_id)
+			.into_iter()
+			.flatten()
+			.map(|board| board.definition.clone())
+			.collect()
 	}
 
-	pub async fn configure(&self, game_id: &str, definitions: Vec<BoardDefinition>) -> Result<(), String>
+	pub async fn configure(
+		&self,
+		game_id: &str,
+		definitions: Vec<BoardDefinition>,
+	) -> Result<(), String>
 	{
 		validate_game_id(game_id)?;
 		if definitions.len() > MAX_BOARDS
 		{
 			return Err("ランキングは1ゲームにつき最大2つです".to_string());
 		}
-		let mut ids = HashSet::new();
-		for definition in &definitions
-		{
-			validate_board_id(&definition.id)?;
-			let name = definition.name.trim();
-			if name.is_empty() || name.chars().count() > 40
-			{
-				return Err("ランキング名は1〜40文字で指定してください".to_string());
-			}
-			if !ids.insert(definition.id.as_str())
-			{
-				return Err("ランキングIDが重複しています".to_string());
-			}
-		}
+		validate_definitions(&definitions)?;
 
 		let mut data = self.data.lock().await;
-		let previous = data.games.remove(game_id).unwrap_or_default();
-		let boards = definitions.into_iter().map(|mut definition| {
-			definition.id = definition.id.trim().to_string();
-			definition.name = definition.name.trim().to_string();
-			let entries = previous.iter().find(|board| board.definition.id == definition.id)
-				.map(|board| board.entries.clone()).unwrap_or_default();
-			let mut board = Leaderboard { definition, entries };
-			sort_entries(&mut board);
-			board
-		}).collect::<Vec<_>>();
-		if !boards.is_empty() { data.games.insert(game_id.to_string(), boards); }
-		self.save_locked(&data).await
+		let mut previous_entries = data.games
+			.remove(game_id)
+			.unwrap_or_default()
+			.into_iter()
+			.map(|board| (board.definition.id, board.entries))
+			.collect::<HashMap<_, _>>();
+		let boards = definitions
+			.into_iter()
+			.map(|definition| build_board(definition, &mut previous_entries))
+			.collect::<Vec<_>>();
+		if !boards.is_empty()
+		{
+			data.games.insert(game_id.to_string(), boards);
+		}
+		self.persist(&data).await
 	}
 
-	pub async fn submit(&self, game_id: &str, board_id: &str, player_name: &str, score: i64) -> Result<usize, String>
+	pub async fn submit(
+		&self,
+		game_id: &str,
+		board_id: &str,
+		player_name: &str,
+		score: i64,
+	) -> Result<usize, String>
 	{
 		validate_game_id(game_id)?;
 		validate_board_id(board_id)?;
 		let player_name = player_name.trim();
-		if player_name.is_empty() || player_name.chars().count() > 24
+		if player_name.is_empty() || player_name.chars().count() > MAX_PLAYER_NAME_LENGTH
 		{
 			return Err("プレイヤー名は1〜24文字で指定してください".to_string());
 		}
@@ -190,29 +185,33 @@ impl LeaderboardStore
 		}
 
 		let mut data = self.data.lock().await;
-		let board = data.games.get_mut(game_id)
+		let board = data.games
+			.get_mut(game_id)
 			.and_then(|boards| boards.iter_mut().find(|board| board.definition.id == board_id))
 			.ok_or_else(|| "ランキングが見つかりません".to_string())?;
-		let rank = 1 + board.entries.iter().filter(|entry| match board.definition.order {
-			RankingOrder::HighScore => entry.score >= score,
-			RankingOrder::LowScore => entry.score <= score,
-		}).count();
-		let submitted_at = unix_time();
-		board.entries.push(ScoreEntry { player_name: player_name.to_string(), score, submitted_at });
+		let rank = insertion_rank(board, score);
+		board.entries.push(ScoreEntry {
+			player_name: player_name.to_string(),
+			score,
+			submitted_at: unix_time(),
+		});
 		sort_entries(board);
 		board.entries.truncate(MAX_STORED_ENTRIES);
-		self.save_locked(&data).await?;
+		self.persist(&data).await?;
 		Ok(rank)
 	}
 
 	pub async fn remove_game(&self, game_id: &str) -> Result<(), String>
 	{
 		let mut data = self.data.lock().await;
-		if data.games.remove(game_id).is_some() { self.save_locked(&data).await?; }
+		if data.games.remove(game_id).is_some()
+		{
+			self.persist(&data).await?;
+		}
 		Ok(())
 	}
 
-	async fn save_locked(&self, data: &LeaderboardData) -> Result<(), String>
+	async fn persist(&self, data: &LeaderboardData) -> Result<(), String>
 	{
 		let json = serde_json::to_string_pretty(data)
 			.map_err(|error| format!("ランキングを保存できません: {error}"))?;
@@ -221,18 +220,36 @@ impl LeaderboardStore
 	}
 }
 
+fn build_board(
+	mut definition: BoardDefinition,
+	previous_entries: &mut HashMap<String, Vec<ScoreEntry>>,
+) -> Leaderboard
+{
+	definition.id = definition.id.trim().to_string();
+	definition.name = definition.name.trim().to_string();
+	let entries = previous_entries.remove(&definition.id).unwrap_or_default();
+	let mut board = Leaderboard { definition, entries };
+	sort_entries(&mut board);
+	board
+}
+
 fn public_board(board: &Leaderboard) -> PublicBoard
 {
 	PublicBoard {
 		id: board.definition.id.clone(),
 		name: board.definition.name.clone(),
 		order: board.definition.order.clone(),
-		entries: board.entries.iter().take(PUBLIC_ENTRY_LIMIT).enumerate().map(|(index, entry)| RankedEntry {
-			rank: index + 1,
-			player_name: entry.player_name.clone(),
-			score: entry.score,
-			submitted_at: entry.submitted_at,
-		}).collect(),
+		entries: board.entries
+			.iter()
+			.take(PUBLIC_ENTRY_LIMIT)
+			.enumerate()
+			.map(|(index, entry)| RankedEntry {
+				rank: index + 1,
+				player_name: entry.player_name.clone(),
+				score: entry.score,
+				submitted_at: entry.submitted_at,
+			})
+			.collect(),
 	}
 }
 
@@ -240,14 +257,53 @@ fn sort_entries(board: &mut Leaderboard)
 {
 	match board.definition.order
 	{
-		RankingOrder::HighScore => board.entries.sort_by(|a, b| b.score.cmp(&a.score).then(a.submitted_at.cmp(&b.submitted_at))),
-		RankingOrder::LowScore => board.entries.sort_by(|a, b| a.score.cmp(&b.score).then(a.submitted_at.cmp(&b.submitted_at))),
+		RankingOrder::HighScore => board.entries.sort_by(|a, b| {
+			b.score.cmp(&a.score).then(a.submitted_at.cmp(&b.submitted_at))
+		}),
+		RankingOrder::LowScore => board.entries.sort_by(|a, b| {
+			a.score.cmp(&b.score).then(a.submitted_at.cmp(&b.submitted_at))
+		}),
 	}
+}
+
+fn insertion_rank(board: &Leaderboard, score: i64) -> usize
+{
+	let higher_ranked_entries = board.entries.iter().filter(|entry| match board.definition.order {
+		RankingOrder::HighScore => entry.score >= score,
+		RankingOrder::LowScore => entry.score <= score,
+	});
+	1 + higher_ranked_entries.count()
+}
+
+fn validate_definitions(definitions: &[BoardDefinition]) -> Result<(), String>
+{
+	let mut ids = HashSet::new();
+	for definition in definitions
+	{
+		let id = definition.id.trim();
+		validate_board_id(id)?;
+
+		let name = definition.name.trim();
+		if name.is_empty() || name.chars().count() > MAX_BOARD_NAME_LENGTH
+		{
+			return Err("ランキング名は1〜40文字で指定してください".to_string());
+		}
+		if !ids.insert(id)
+		{
+			return Err("ランキングIDが重複しています".to_string());
+		}
+	}
+	Ok(())
 }
 
 fn validate_game_id(value: &str) -> Result<(), String>
 {
-	if value.is_empty() || value.len() > 100 || value.contains(['/', '\\']) || value == "." || value == ".."
+	let is_invalid = value.is_empty()
+		|| value.len() > 100
+		|| value.contains(['/', '\\'])
+		|| value == "."
+		|| value == "..";
+	if is_invalid
 	{
 		Err("ゲームIDが不正です".to_string())
 	}
@@ -257,7 +313,9 @@ fn validate_game_id(value: &str) -> Result<(), String>
 fn validate_board_id(value: &str) -> Result<(), String>
 {
 	let value = value.trim();
-	if value.is_empty() || value.len() > 32 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+	let has_valid_characters = value.bytes()
+		.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+	if value.is_empty() || value.len() > MAX_BOARD_ID_LENGTH || !has_valid_characters
 	{
 		Err("ランキングIDは32文字以内の半角英数字・_・-で指定してください".to_string())
 	}
@@ -266,48 +324,10 @@ fn validate_board_id(value: &str) -> Result<(), String>
 
 fn unix_time() -> i64
 {
-	SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
-}
-
-type PublicResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
-
-fn public_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ErrorResponse>)
-{
-	(status, Json(ErrorResponse { ok: false, message: message.into() }))
-}
-
-async fn get_public(
-	State(store): State<LeaderboardStore>,
-	AxumPath(game_id): AxumPath<String>,
-) -> PublicResult<GameLeaderboards>
-{
-	validate_game_id(&game_id).map_err(|error| public_error(StatusCode::BAD_REQUEST, error))?;
-	Ok(Json(store.get(&game_id).await))
-}
-
-async fn submit_public(
-	State(store): State<LeaderboardStore>,
-	AxumPath((game_id, board_id)): AxumPath<(String, String)>,
-	Json(request): Json<SubmitScoreRequest>,
-) -> PublicResult<SubmitScoreResponse>
-{
-	let rank = store.submit(&game_id, &board_id, &request.player_name, request.score).await
-		.map_err(|error| public_error(StatusCode::BAD_REQUEST, error))?;
-	Ok(Json(SubmitScoreResponse { ok: true, rank }))
-}
-
-pub async fn serve(store: LeaderboardStore, bind: &str) -> Result<(), String>
-{
-	let address: SocketAddr = bind.parse()
-		.map_err(|error| format!("admin-config.jsonのleaderboard_bindが不正です: {error}"))?;
-	let app = Router::new()
-		.route("/v1/games/{game_id}/leaderboards", get(get_public))
-		.route("/v1/games/{game_id}/leaderboards/{board_id}/scores", post(submit_public))
-		.with_state(store);
-	let listener = tokio::net::TcpListener::bind(address).await
-		.map_err(|error| format!("ランキングAPIを{bind}で起動できません: {error}"))?;
-	println!("Leaderboard API listening on http://{bind}");
-	axum::serve(listener, app).await.map_err(|error| error.to_string())
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_secs() as i64
 }
 
 #[cfg(test)]
