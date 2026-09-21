@@ -7,12 +7,14 @@ pub mod gamelauncher
 
 use gamelauncher::game_service_server::{GameService, GameServiceServer};
 use gamelauncher::{
-	DownloadRequest, Identificial, UpdateNotice, VersionRequest, VersionResponse,
+	AddCommentRequest, Comment, CommentListRequest, CommentListResponse, DownloadRequest,
+	Identificial, UpdateNotice, VersionRequest, VersionResponse,
 };
 
 mod net;
 mod init;
 mod src;
+mod admin;
 
 use crate::src::spawn_monitor;
 
@@ -49,6 +51,22 @@ impl GameService for GameLauncherServer
 	{
 		net::update_notice::send_update_notice(request, &self.shared_tx).await
 	}
+
+	async fn list_comments(
+		&self,
+		request: Request<CommentListRequest>,
+	) -> Result<Response<CommentListResponse>, Status>
+	{
+		net::comments::handle_list_comments(request).await
+	}
+
+	async fn add_comment(
+		&self,
+		request: Request<AddCommentRequest>,
+	) -> Result<Response<Comment>, Status>
+	{
+		net::comments::handle_add_comment(request).await
+	}
 }
 
 #[tokio::main]
@@ -58,6 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>
 
 	let shared_tx = spawn_monitor::spawn_monitor();
 	let server 	= GameLauncherServer { shared_tx };
+	let admin_tx = server.shared_tx.clone();
+	tokio::spawn(async move {
+		if let Err(error) = admin::serve(admin_tx).await
+		{
+			eprintln!("Admin UI error: {error}");
+		}
+	});
 
 	let addr_v4 = "0.0.0.0:50050".parse()?;
 	let addr_v6 = "[::]:50050".parse()?;

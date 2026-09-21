@@ -36,7 +36,8 @@ pub fn spawn_monitor() -> Arc<broadcast::Sender<UpdateNotice>>
 					{
 						for game_meta in &meta
 						{
-							let clean_id = if !game_meta.id.is_empty() { game_meta.id.trim_end_matches(".exe").to_string() } else { game_meta.game.trim_end_matches(".exe").to_string() };
+							let raw_id = if !game_meta.id.is_empty() { &game_meta.id } else { &game_meta.game };
+							let Ok(clean_id) = crate::net::normalize_game_id(raw_id) else { continue; };
 							let _ = monitor_tx.send(UpdateNotice {
 								game_id: clean_id,
 								version: game_meta.version.clone(),

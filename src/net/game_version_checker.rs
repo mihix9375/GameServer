@@ -17,26 +17,14 @@ pub async fn handle_check_version(request: Request<VersionRequest>) -> Result<Re
 
 	let req = request.into_inner();
 
-	let target_game = req.game_id;
+	let target_game = crate::net::normalize_game_id(&req.game_id)?;
 	let current_version = req.current_version;
 	let target_path = game_path.join(target_game);
 	println!("game id : {:?}", target_path);
 
 	let latest_version = search_game(target_path).await?;
 
-	let parse_ver = |ver: &str| -> (i32, i32, i32)
-	{
-		let mut parts = ver.split('.').map(|s| s.parse::<i32>().unwrap_or(0));
-		(
-			parts.next().unwrap_or(0),
-			parts.next().unwrap_or(0),
-			parts.next().unwrap_or(0),
-		)
-	};
-
-	let cv = parse_ver(&current_version);
-	let lv = parse_ver(&latest_version);
-	let need_update: bool = cv < lv;
+	let need_update = crate::net::compare_versions(&current_version, &latest_version)?.is_lt();
 
 	let res = VersionResponse
 	{
