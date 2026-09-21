@@ -48,6 +48,7 @@
             <dl class="details">
               <div><dt>gRPC IPv4</dt><dd id="grpc-v4">--</dd></div>
               <div><dt>gRPC IPv6</dt><dd id="grpc-v6">--</dd></div>
+              <div><dt>ランキングAPI</dt><dd id="leaderboard-api">--</dd></div>
               <div><dt>ゲーム保存先</dt><dd id="games-directory">--</dd></div>
               <div><dt>コメント保存先</dt><dd id="comments-file">--</dd></div>
             </dl>
@@ -104,6 +105,21 @@
       <div class="dialog-actions">
         <button id="cancel-edit" class="button secondary" type="button">キャンセル</button>
         <button id="save-edit" class="button primary" type="submit">変更を保存</button>
+      </div>
+    </form>
+  </div>
+  <div id="ranking-modal" class="dialog hidden">
+    <form id="ranking-form" class="dialog-card">
+      <div class="dialog-head">
+        <div><p class="eyebrow">LEADERBOARDS</p><h2 id="ranking-heading">ランキング設定</h2></div>
+        <button id="close-ranking" class="icon-button" type="button" aria-label="閉じる">×</button>
+      </div>
+      <input id="ranking-game-id" type="hidden">
+      <p class="form-note">Unityから投稿・取得できるランキングを最大2つ設定できます。IDは後から変更すると別ランキング扱いになります。</p>
+      <div id="ranking-fields" class="ranking-fields"></div>
+      <div class="dialog-actions">
+        <button id="cancel-ranking" class="button secondary" type="button">キャンセル</button>
+        <button id="save-ranking" class="button primary" type="submit">設定を保存</button>
       </div>
     </form>
   </div>

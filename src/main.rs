@@ -15,6 +15,7 @@ mod net;
 mod init;
 mod src;
 mod admin;
+mod leaderboards;
 
 use crate::src::spawn_monitor;
 
@@ -77,10 +78,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>>
 	let shared_tx = spawn_monitor::spawn_monitor();
 	let server 	= GameLauncherServer { shared_tx };
 	let admin_tx = server.shared_tx.clone();
+	let root = std::env::current_exe()?.parent().ok_or("実行ファイルの場所を取得できません")?.to_path_buf();
+	let leaderboard_store = leaderboards::LeaderboardStore::load(&root).await?;
+	let admin_leaderboards = leaderboard_store.clone();
 	tokio::spawn(async move {
-		if let Err(error) = admin::serve(admin_tx).await
+		if let Err(error) = admin::serve(admin_tx, admin_leaderboards).await
 		{
 			eprintln!("Admin UI error: {error}");
+		}
+	});
+	let leaderboard_bind = admin::leaderboard_bind(&root)?;
+	tokio::spawn(async move {
+		if let Err(error) = leaderboards::serve(leaderboard_store, &leaderboard_bind).await
+		{
+			eprintln!("Leaderboard API error: {error}");
 		}
 	});
 
