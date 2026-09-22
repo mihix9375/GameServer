@@ -34,14 +34,35 @@ pub fn spawn_monitor() -> Arc<broadcast::Sender<UpdateNotice>>
 				{
 					if meta != meta_cache
 					{
+						let current_ids = meta.iter().filter_map(|game_meta| {
+							let raw_id = if !game_meta.id.is_empty() { &game_meta.id } else { &game_meta.game };
+							crate::net::normalize_game_id(raw_id).ok()
+						}).collect::<std::collections::HashSet<_>>();
+						if let Err(error) = crate::net::update_notice::clear_published_removals(&current_ids).await
+						{
+							eprintln!("削除履歴を更新できません: {error}");
+						}
+						for previous in &meta_cache
+						{
+							let raw_id = if !previous.id.is_empty() { &previous.id } else { &previous.game };
+							let Ok(clean_id) = crate::net::normalize_game_id(raw_id) else { continue; };
+							if !current_ids.contains(&clean_id)
+							{
+								if let Err(error) = crate::net::update_notice::record_removal(&clean_id).await
+								{
+									eprintln!("削除履歴を保存できません ({clean_id}): {error}");
+								}
+								let _ = monitor_tx.send(crate::net::update_notice::delete_notice(clean_id));
+							}
+						}
 						for game_meta in &meta
 						{
 							let raw_id = if !game_meta.id.is_empty() { &game_meta.id } else { &game_meta.game };
 							let Ok(clean_id) = crate::net::normalize_game_id(raw_id) else { continue; };
-							let _ = monitor_tx.send(UpdateNotice {
-								game_id: clean_id,
-								version: game_meta.version.clone(),
-							});
+							let _ = monitor_tx.send(crate::net::update_notice::upsert_notice(
+								clean_id,
+								game_meta.version.clone(),
+							));
 						}
 						meta_cache = meta;
 					}

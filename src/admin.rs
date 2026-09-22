@@ -448,7 +448,10 @@ async fn update_game(
 	let root = state.root.clone();
 	let games = root.join("games");
 	let _ = tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await;
-	let receivers = state.updates.send(UpdateNotice { game_id: clean_id.clone(), version: meta.version.clone() }).unwrap_or(0);
+	let receivers = state.updates.send(crate::net::update_notice::upsert_notice(
+		clean_id.clone(),
+		meta.version.clone(),
+	)).unwrap_or(0);
 	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}を更新しました（通知先: {receivers}）") }))
 }
 
@@ -478,8 +481,17 @@ async fn delete_game(
 		.map_err(|message| api_error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
 	let root = state.root.clone();
 	let games = root.join("games");
-	let _ = tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await;
-	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}と関連コメントを削除しました") }))
+	tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await
+		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ゲーム一覧を更新できません: {error}")))?;
+	let removal_history_error = crate::net::update_notice::record_removal(&clean_id).await.err();
+	let receivers = state.updates.send(crate::net::update_notice::delete_notice(clean_id.clone())).unwrap_or(0);
+	Ok(Json(ActionResponse {
+		ok: true,
+		message: match removal_history_error {
+			Some(error) => format!("{clean_id}を削除してLauncherへ通知しましたが、オフライン端末用の削除履歴を保存できませんでした: {error}"),
+			None => format!("{clean_id}と関連データを削除し、Launcherへ通知しました（受信: {receivers}）"),
+		},
+	}))
 }
 
 async fn notify(
@@ -500,7 +512,10 @@ async fn notify(
 		crate::net::normalize_game_id(if game.id.is_empty() { &game.game } else { &game.id })
 			.ok().as_deref() == Some(clean_id.as_str())
 	}).ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ゲームが見つかりません"))?;
-	let receivers = state.updates.send(UpdateNotice { game_id: clean_id.clone(), version: game.version.clone() }).unwrap_or(0);
+	let receivers = state.updates.send(crate::net::update_notice::upsert_notice(
+		clean_id.clone(),
+		game.version.clone(),
+	)).unwrap_or(0);
 	Ok(Json(ActionResponse {
 		ok: true,
 		message: format!("{clean_id} v{} の更新通知を送信しました（受信: {receivers}）", game.version),
