@@ -2,6 +2,7 @@ pub mod game_distributor;
 pub mod game_version_checker;
 pub mod update_notice;
 pub mod comments;
+pub mod game_files;
 
 use std::cmp::Ordering;
 use std::path::{Component, Path};

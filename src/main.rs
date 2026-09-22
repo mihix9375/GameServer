@@ -10,7 +10,7 @@ pub mod gamelauncher
 use gamelauncher::game_service_server::{GameService, GameServiceServer};
 use gamelauncher::{
 	AddCommentRequest, Comment, CommentListRequest, CommentListResponse, DownloadRequest,
-	Identificial, UpdateNotice, VersionRequest, VersionResponse,
+	GameFilesRequest, GameManifest, Identificial, UpdateNotice, VersionRequest, VersionResponse,
 };
 
 mod net;
@@ -44,6 +44,23 @@ impl GameService for GameLauncherServer
 	) -> Result<Response<Self::DownloadGameStream>, Status>
 	{
 		net::game_distributor::handle_game_distributor(request).await
+	}
+
+	async fn get_game_manifest(
+		&self,
+		request: Request<DownloadRequest>,
+	) -> Result<Response<GameManifest>, Status>
+	{
+		net::game_files::handle_manifest(request).await
+	}
+
+	type DownloadGameFilesStream = net::game_files::GameFileStream;
+	async fn download_game_files(
+		&self,
+		request: Request<GameFilesRequest>,
+	) -> Result<Response<Self::DownloadGameFilesStream>, Status>
+	{
+		net::game_files::handle_download_files(request).await
 	}
 
 	type WaitUpdateStream = tonic::codegen::tokio_stream::wrappers::ReceiverStream<Result<UpdateNotice, Status>>;
