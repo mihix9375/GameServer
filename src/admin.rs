@@ -177,16 +177,25 @@ pub fn leaderboard_bind(root: &Path) -> Result<String, String>
 	Ok(load_config(root)?.leaderboard_bind)
 }
 
-async fn index() -> Html<&'static str> { Html(INDEX_HTML) }
+async fn index() -> impl IntoResponse
+{
+	([(header::CACHE_CONTROL, "no-store")], Html(INDEX_HTML))
+}
 
 async fn css() -> impl IntoResponse
 {
-	([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS)
+	([
+		(header::CONTENT_TYPE, "text/css; charset=utf-8"),
+		(header::CACHE_CONTROL, "no-store"),
+	], APP_CSS)
 }
 
 async fn js() -> impl IntoResponse
 {
-	([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
+	([
+		(header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+		(header::CACHE_CONTROL, "no-store"),
+	], APP_JS)
 }
 
 async fn status(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult<StatusResponse>
