@@ -25,6 +25,21 @@ GameLauncherへゲーム、更新、コメント、ランキングを提供す�
 
 UnityゲームはGameServerへ直接接続しません。通信経路は `Unity → Launcher（127.0.0.1:50053）→ GameServer（50052）` です。
 
+## 全体構成
+
+```text
+Unityゲーム
+  └─ GameLauncher-Unity-Ranking（UPMパッケージ）
+       └─ GameLauncher :50053
+            ├─ GameServer :50050（gRPC）
+            └─ GameServer :50052（ランキングHTTP API）
+
+運用ブラウザー
+  └─ GameServer :50051（管理画面）
+```
+
+通常、ゲーム制作者が知る必要があるのは`meta.json`のゲームIDと、管理画面で設定したランキングIDだけです。
+
 ## すぐに起動する
 
 配布された `Server.exe` を専用フォルダーへ置いて実行します。初回起動時に、実行ファイルと同じ場所へ必要なフォルダーと `admin-config.json` が作成されます。
@@ -123,7 +138,27 @@ Serverは配布ZIPからファイルサイズとSHA-256を含むマニフェス�
 
 ## UnityランキングAPI
 
-ゲームごとに最大2つ、`high_score`または`low_score`のランキングを設定できます。Unity向けエンドポイント、JSON形式、C#実装例は [UNITY_LEADERBOARD_API.md](UNITY_LEADERBOARD_API.md) を参照してください。
+ゲームごとに最大2つ、`high_score`（大きい値が上位）または`low_score`（小さい値が上位）のランキングを設定できます。
+
+1. 管理画面で対象ゲームの「ランキング」を開きます。
+2. ランキングID、表示名、並び順を設定します。
+3. Unityへ次のGit URLからパッケージを追加します。
+
+```text
+https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#v0.1.0
+```
+
+4. ゲームクリア時などに関数を呼び出します。
+
+```csharp
+ScoreResult result = await RankingApi.SubmitScoreAsync(
+    "SampleGame",
+    "high_score",
+    playerName,
+    score);
+```
+
+Unity側の導入方法は [GameLauncher-Unity-Ranking](https://github.com/mihix9375/GameLauncher-Unity-Ranking) を参照してください。HTTPエンドポイントとJSON形式は [UNITY_LEADERBOARD_API.md](UNITY_LEADERBOARD_API.md) に記載しています。
 
 ## ソースから実行する
 
@@ -165,4 +200,5 @@ cargo test
 ## 関連リポジトリ
 
 - [GameLauncher](https://github.com/mihix9375/GameLauncher)
+- [GameLauncher Ranking API for Unity](https://github.com/mihix9375/GameLauncher-Unity-Ranking)
 - [共有proto](https://github.com/mihix9375/proto)
