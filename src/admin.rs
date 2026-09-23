@@ -26,15 +26,22 @@ struct AdminConfig
 	bind: String,
 	#[serde(default)]
 	token: String,
+	#[serde(default = "default_leaderboard_bind")]
+	leaderboard_bind: String,
 }
 
 fn default_bind() -> String { "127.0.0.1:50051".to_string() }
+fn default_leaderboard_bind() -> String { "0.0.0.0:50052".to_string() }
 
 impl Default for AdminConfig
 {
 	fn default() -> Self
 	{
-		Self { bind: default_bind(), token: String::new() }
+		Self {
+			bind: default_bind(),
+			token: String::new(),
+			leaderboard_bind: default_leaderboard_bind(),
+		}
 	}
 }
 
@@ -43,10 +50,12 @@ struct AdminState
 {
 	root: PathBuf,
 	bind: String,
+	leaderboard_bind: String,
 	token: String,
 	started_at: Instant,
 	updates: Arc<broadcast::Sender<UpdateNotice>>,
 	operation_lock: Arc<Mutex<()>>,
+	leaderboards: crate::leaderboards::LeaderboardStore,
 }
 
 #[derive(Serialize)]
@@ -55,6 +64,7 @@ struct StatusResponse
 	status: &'static str,
 	grpc: [&'static str; 2],
 	admin: String,
+	leaderboard_api: String,
 	uptime_seconds: u64,
 	games_directory: String,
 	comments_file: String,
@@ -103,11 +113,25 @@ struct GameUpdate
 	tags: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct LeaderboardUpdate
+{
+	leaderboards: Vec<crate::leaderboards::BoardDefinition>,
+}
+
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ActionResponse>)>;
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ActionResponse>)
 {
 	(status, Json(ActionResponse { ok: false, message: message.into() }))
+}
+
+fn existing_game_id(state: &AdminState, game_id: &str) -> Result<String, (StatusCode, Json<ActionResponse>)>
+{
+	let game_id = crate::net::normalize_game_id(game_id)
+		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.message().to_string()))?;
+	find_game_directory(&state.root, &game_id)?;
+	Ok(game_id)
 }
 
 fn authorize(state: &AdminState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ActionResponse>)>
@@ -148,6 +172,11 @@ fn load_config(root: &Path) -> Result<AdminConfig, String>
 	serde_json::from_str(&content).map_err(|error| format!("admin-config.jsonが不正です: {error}"))
 }
 
+pub fn leaderboard_bind(root: &Path) -> Result<String, String>
+{
+	Ok(load_config(root)?.leaderboard_bind)
+}
+
 async fn index() -> Html<&'static str> { Html(INDEX_HTML) }
 
 async fn css() -> impl IntoResponse
@@ -168,11 +197,37 @@ async fn status(State(state): State<AdminState>, headers: HeaderMap) -> ApiResul
 		status: "online",
 		grpc: ["0.0.0.0:50050", "[::]:50050"],
 		admin: state.bind.clone(),
+		leaderboard_api: state.leaderboard_bind.clone(),
 		uptime_seconds: state.started_at.elapsed().as_secs(),
 		games_directory: state.root.join("games").display().to_string(),
 		comments_file: state.root.join("comments.jsonl").display().to_string(),
 		remote_access: !address.ip().is_loopback(),
 	}))
+}
+
+async fn get_leaderboards(
+	State(state): State<AdminState>,
+	headers: HeaderMap,
+	AxumPath(game_id): AxumPath<String>,
+) -> ApiResult<Vec<crate::leaderboards::BoardDefinition>>
+{
+	authorize(&state, &headers)?;
+	let clean_id = existing_game_id(&state, &game_id)?;
+	Ok(Json(state.leaderboards.definitions(&clean_id).await))
+}
+
+async fn update_leaderboards(
+	State(state): State<AdminState>,
+	headers: HeaderMap,
+	AxumPath(game_id): AxumPath<String>,
+	Json(update): Json<LeaderboardUpdate>,
+) -> ApiResult<ActionResponse>
+{
+	authorize(&state, &headers)?;
+	let clean_id = existing_game_id(&state, &game_id)?;
+	state.leaderboards.configure(&clean_id, update.leaderboards).await
+		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}のランキング設定を保存しました") }))
 }
 
 async fn games(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult<Vec<Meta>>
@@ -393,7 +448,10 @@ async fn update_game(
 	let root = state.root.clone();
 	let games = root.join("games");
 	let _ = tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await;
-	let receivers = state.updates.send(UpdateNotice { game_id: clean_id.clone(), version: meta.version.clone() }).unwrap_or(0);
+	let receivers = state.updates.send(crate::net::update_notice::upsert_notice(
+		clean_id.clone(),
+		meta.version.clone(),
+	)).unwrap_or(0);
 	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}を更新しました（通知先: {receivers}）") }))
 }
 
@@ -419,10 +477,21 @@ async fn delete_game(
 		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ゲームを削除できません: {error}")))?;
 	crate::net::comments::delete_comments_for_game(&clean_id).await
 		.map_err(|message| api_error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
+	state.leaderboards.remove_game(&clean_id).await
+		.map_err(|message| api_error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
 	let root = state.root.clone();
 	let games = root.join("games");
-	let _ = tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await;
-	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}と関連コメントを削除しました") }))
+	tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await
+		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ゲーム一覧を更新できません: {error}")))?;
+	let removal_history_error = crate::net::update_notice::record_removal(&clean_id).await.err();
+	let receivers = state.updates.send(crate::net::update_notice::delete_notice(clean_id.clone())).unwrap_or(0);
+	Ok(Json(ActionResponse {
+		ok: true,
+		message: match removal_history_error {
+			Some(error) => format!("{clean_id}を削除してLauncherへ通知しましたが、オフライン端末用の削除履歴を保存できませんでした: {error}"),
+			None => format!("{clean_id}と関連データを削除し、Launcherへ通知しました（受信: {receivers}）"),
+		},
+	}))
 }
 
 async fn notify(
@@ -443,14 +512,20 @@ async fn notify(
 		crate::net::normalize_game_id(if game.id.is_empty() { &game.game } else { &game.id })
 			.ok().as_deref() == Some(clean_id.as_str())
 	}).ok_or_else(|| api_error(StatusCode::NOT_FOUND, "ゲームが見つかりません"))?;
-	let receivers = state.updates.send(UpdateNotice { game_id: clean_id.clone(), version: game.version.clone() }).unwrap_or(0);
+	let receivers = state.updates.send(crate::net::update_notice::upsert_notice(
+		clean_id.clone(),
+		game.version.clone(),
+	)).unwrap_or(0);
 	Ok(Json(ActionResponse {
 		ok: true,
 		message: format!("{clean_id} v{} の更新通知を送信しました（受信: {receivers}）", game.version),
 	}))
 }
 
-pub async fn serve(updates: Arc<broadcast::Sender<UpdateNotice>>) -> Result<(), String>
+pub async fn serve(
+	updates: Arc<broadcast::Sender<UpdateNotice>>,
+	leaderboards: crate::leaderboards::LeaderboardStore,
+) -> Result<(), String>
 {
 	let root = executable_root()?;
 	let config = load_config(&root)?;
@@ -463,10 +538,12 @@ pub async fn serve(updates: Arc<broadcast::Sender<UpdateNotice>>) -> Result<(), 
 	let state = AdminState {
 		root,
 		bind: config.bind.clone(),
+		leaderboard_bind: config.leaderboard_bind.clone(),
 		token: config.token.trim().to_string(),
 		started_at: Instant::now(),
 		updates,
 		operation_lock: Arc::new(Mutex::new(())),
+		leaderboards,
 	};
 	let app = Router::new()
 		.route("/", get(index))
@@ -476,6 +553,7 @@ pub async fn serve(updates: Arc<broadcast::Sender<UpdateNotice>>) -> Result<(), 
 		.route("/api/games", get(games))
 		.route("/api/games/upload", post(upload_game).layer(DefaultBodyLimit::disable()))
 		.route("/api/games/{game_id}", patch(update_game).delete(delete_game))
+		.route("/api/leaderboards/{game_id}", get(get_leaderboards).put(update_leaderboards))
 		.route("/api/comments", get(comments))
 		.route("/api/comments/{comment_id}", delete(remove_comment))
 		.route("/api/rescan", post(rescan))

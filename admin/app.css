@@ -14,7 +14,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 65% -20%, #172d50 0, transparent 37%), var(--bg); color: var(--text); }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 .shell { min-height: 100vh; display: grid; grid-template-columns: 238px minmax(0, 1fr); }
 .sidebar { position: sticky; top: 0; height: 100vh; padding: 24px 16px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: rgba(11,15,22,.9); backdrop-filter: blur(18px); }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 8px 28px; }
@@ -97,7 +97,15 @@ h2 { margin-bottom: 0; font-size: 17px; }
 .form-grid label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .form-grid label.wide { grid-column: 1 / -1; }
 .form-grid input, .form-grid textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; outline: none; background: #090d13; color: var(--text); resize: vertical; }
+.form-grid select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; outline: none; background: #090d13; color: var(--text); }
 .form-grid input:focus, .form-grid textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #4c8dff18; }
+.form-note { margin: -8px 0 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.ranking-fields { display: grid; gap: 14px; }
+.ranking-field { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+.ranking-field legend { padding: 0 7px; font-size: 12px; font-weight: 800; color: #9fc0ff; }
+.ranking-enabled { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; font-size: 12px; }
+.ranking-enabled input { accent-color: var(--blue); }
+.ranking-field input:disabled, .ranking-field select:disabled { opacity: .45; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
 .toast { position: fixed; right: 24px; bottom: 24px; z-index: 70; padding: 12px 17px; border: 1px solid var(--line); border-radius: 10px; background: #172130; box-shadow: 0 15px 40px #0008; opacity: 0; transform: translateY(15px); pointer-events: none; transition: .2s; font-size: 12px; }
 .toast.show { opacity: 1; transform: translateY(0); }

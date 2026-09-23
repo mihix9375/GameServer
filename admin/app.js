@@ -60,6 +60,7 @@ function renderStatus() {
   $("#admin-address").textContent = data.admin;
   $("#grpc-v4").textContent = data.grpc[0];
   $("#grpc-v6").textContent = data.grpc[1];
+  $("#leaderboard-api").textContent = `http://${data.leaderboard_api}`;
   $("#games-directory").textContent = data.games_directory;
   $("#comments-file").textContent = data.comments_file;
 }
@@ -81,11 +82,13 @@ function renderGames() {
     const actions = document.createElement("div"); actions.className = "game-actions";
     const edit = document.createElement("button"); edit.className = "button secondary"; edit.textContent = "編集";
     edit.addEventListener("click", () => openGameEditor(game));
+    const ranking = document.createElement("button"); ranking.className = "button secondary"; ranking.textContent = "ランキング";
+    ranking.addEventListener("click", () => openRankingEditor(game));
     const notify = document.createElement("button"); notify.className = "button secondary"; notify.textContent = "更新通知を送る";
     notify.addEventListener("click", () => sendNotification(gameId(game), notify));
     const remove = document.createElement("button"); remove.className = "button danger"; remove.textContent = "削除";
     remove.addEventListener("click", () => deleteGame(game, remove));
-    head.append(title, version); actions.append(edit, notify, remove); row.append(head, id, actions); list.append(row);
+    head.append(title, version); actions.append(edit, ranking, notify, remove); row.append(head, id, actions); list.append(row);
   }
 }
 
@@ -145,6 +148,86 @@ function openGameEditor(game) {
 
 function closeGameEditor() {
   $("#edit-modal").classList.add("hidden");
+}
+
+function rankingField(index, board = {}) {
+  const field = document.createElement("fieldset");
+  field.className = "ranking-field";
+  field.innerHTML = `
+    <legend>ランキング ${index + 1}</legend>
+    <label class="ranking-enabled"><input type="checkbox" data-role="enabled"> 使用する</label>
+    <div class="form-grid">
+      <label><span>ID（半角英数字・_・-）</span><input data-role="id" maxlength="32" placeholder="score"></label>
+      <label><span>表示名</span><input data-role="name" maxlength="40" placeholder="ハイスコア"></label>
+      <label class="wide"><span>並び順</span><select data-role="order"><option value="high_score">高得点順（大きい方が上）</option><option value="low_score">低タイム順（小さい方が上）</option></select></label>
+    </div>`;
+  const enabled = field.querySelector('[data-role="enabled"]');
+  const controls = [...field.querySelectorAll('[data-role="id"], [data-role="name"], [data-role="order"]')];
+  enabled.checked = Boolean(board.id);
+  field.querySelector('[data-role="id"]').value = board.id || "";
+  field.querySelector('[data-role="name"]').value = board.name || "";
+  field.querySelector('[data-role="order"]').value = board.order || "high_score";
+
+  const syncEnabledState = () => {
+    for (const control of controls) {
+      control.disabled = !enabled.checked;
+    }
+  };
+  enabled.addEventListener("change", syncEnabledState);
+  syncEnabledState();
+  return field;
+}
+
+async function openRankingEditor(game) {
+  const id = gameId(game);
+  try {
+    const boards = await api(`/api/leaderboards/${encodeURIComponent(id)}`);
+    $("#ranking-game-id").value = id;
+    $("#ranking-heading").textContent = `${game.title || id} のランキング`;
+    const fields = $("#ranking-fields");
+    fields.replaceChildren(rankingField(0, boards[0]), rankingField(1, boards[1]));
+    $("#ranking-modal").classList.remove("hidden");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function closeRankingEditor() {
+  $("#ranking-modal").classList.add("hidden");
+}
+
+function readRankingField(field) {
+  return {
+    id: field.querySelector('[data-role="id"]').value.trim(),
+    name: field.querySelector('[data-role="name"]').value.trim(),
+    order: field.querySelector('[data-role="order"]').value,
+  };
+}
+
+async function saveRankings(event) {
+  event.preventDefault();
+  const id = $("#ranking-game-id").value;
+  const leaderboards = $$(".ranking-field")
+    .filter((field) => field.querySelector('[data-role="enabled"]').checked)
+    .map(readRankingField);
+  const button = $("#save-ranking");
+  button.disabled = true;
+
+  try {
+    const result = await api(`/api/leaderboards/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leaderboards }),
+    });
+    closeRankingEditor();
+    toast(result.message);
+    log(result.message);
+  } catch (error) {
+    toast(error.message, true);
+    log(`ランキング設定失敗: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function saveGame(event) {
@@ -227,6 +310,10 @@ $("#edit-form").addEventListener("submit", saveGame);
 $("#close-edit").addEventListener("click", closeGameEditor);
 $("#cancel-edit").addEventListener("click", closeGameEditor);
 $("#edit-modal").addEventListener("click", (event) => { if (event.target === $("#edit-modal")) closeGameEditor(); });
+$("#ranking-form").addEventListener("submit", saveRankings);
+$("#close-ranking").addEventListener("click", closeRankingEditor);
+$("#cancel-ranking").addEventListener("click", closeRankingEditor);
+$("#ranking-modal").addEventListener("click", (event) => { if (event.target === $("#ranking-modal")) closeRankingEditor(); });
 $("#login-form").addEventListener("submit", async (event) => {
   event.preventDefault(); state.token = $("#token").value; sessionStorage.setItem("admin-token", state.token);
   $("#login-error").textContent = "";

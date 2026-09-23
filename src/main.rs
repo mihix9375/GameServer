@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use tonic::{transport::Server, Request, Response, Status};
 
 pub mod gamelauncher
@@ -8,13 +10,14 @@ pub mod gamelauncher
 use gamelauncher::game_service_server::{GameService, GameServiceServer};
 use gamelauncher::{
 	AddCommentRequest, Comment, CommentListRequest, CommentListResponse, DownloadRequest,
-	Identificial, UpdateNotice, VersionRequest, VersionResponse,
+	GameFilesRequest, GameManifest, Identificial, UpdateNotice, VersionRequest, VersionResponse,
 };
 
 mod net;
 mod init;
 mod src;
 mod admin;
+mod leaderboards;
 
 use crate::src::spawn_monitor;
 
@@ -43,6 +46,23 @@ impl GameService for GameLauncherServer
 		net::game_distributor::handle_game_distributor(request).await
 	}
 
+	async fn get_game_manifest(
+		&self,
+		request: Request<DownloadRequest>,
+	) -> Result<Response<GameManifest>, Status>
+	{
+		net::game_files::handle_manifest(request).await
+	}
+
+	type DownloadGameFilesStream = net::game_files::GameFileStream;
+	async fn download_game_files(
+		&self,
+		request: Request<GameFilesRequest>,
+	) -> Result<Response<Self::DownloadGameFilesStream>, Status>
+	{
+		net::game_files::handle_download_files(request).await
+	}
+
 	type WaitUpdateStream = tonic::codegen::tokio_stream::wrappers::ReceiverStream<Result<UpdateNotice, Status>>;
 	async fn wait_update(
 		&self,
@@ -69,20 +89,46 @@ impl GameService for GameLauncherServer
 	}
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> 
+fn executable_root() -> Result<PathBuf, std::io::Error>
 {
-	init::init();
+	let executable = std::env::current_exe()?;
+	executable.parent()
+		.map(Path::to_path_buf)
+		.ok_or_else(|| std::io::Error::other("実行ファイルの場所を取得できません"))
+}
 
-	let shared_tx = spawn_monitor::spawn_monitor();
-	let server 	= GameLauncherServer { shared_tx };
-	let admin_tx = server.shared_tx.clone();
+async fn spawn_http_services(root: &Path, server: &GameLauncherServer) -> Result<(), String>
+{
+	let leaderboard_store = leaderboards::LeaderboardStore::load(root).await?;
+	let leaderboard_bind = admin::leaderboard_bind(root)?;
+
+	let admin_updates = server.shared_tx.clone();
+	let admin_leaderboards = leaderboard_store.clone();
 	tokio::spawn(async move {
-		if let Err(error) = admin::serve(admin_tx).await
+		if let Err(error) = admin::serve(admin_updates, admin_leaderboards).await
 		{
 			eprintln!("Admin UI error: {error}");
 		}
 	});
+
+	tokio::spawn(async move {
+		if let Err(error) = leaderboards::serve(leaderboard_store, &leaderboard_bind).await
+		{
+			eprintln!("Leaderboard API error: {error}");
+		}
+	});
+	Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>>
+{
+	init::init();
+
+	let shared_tx = spawn_monitor::spawn_monitor();
+	let server = GameLauncherServer { shared_tx };
+	spawn_http_services(&executable_root()?, &server).await
+		.map_err(std::io::Error::other)?;
 
 	let addr_v4 = "0.0.0.0:50050".parse()?;
 	let addr_v6 = "[::]:50050".parse()?;
