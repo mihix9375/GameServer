@@ -145,7 +145,7 @@ Serverは配布ZIPからファイルサイズとSHA-256を含むマニフェス�
 3. Unityへ次のGit URLからパッケージを追加します。
 
 ```text
-https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#main
+https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#v0.1.3
 ```
 
 4. ゲームクリア時などに関数を呼び出します。
