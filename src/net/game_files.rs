@@ -150,23 +150,13 @@ fn build_manifest(
 	let mut archive = ZipArchive::new(file)
 		.map_err(|error| Status::internal(format!("配布ZIPが不正です: {error}")))?;
 	let mut files = Vec::new();
-	let mut paths = HashSet::new();
 	let mut buffer = vec![0u8; FILE_CHUNK_SIZE];
+	let archive_files = canonical_archive_files(&mut archive)?;
 
-	for index in 0..archive.len()
+	for (index, path) in archive_files
 	{
 		let mut entry = archive.by_index(index)
 			.map_err(|error| Status::internal(format!("ZIPエントリを読めません: {error}")))?;
-		if entry.is_dir() { continue; }
-		if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000)
-		{
-			return Err(Status::failed_precondition("ZIP内のシンボリックリンクは使用できません"));
-		}
-		let path = safe_archive_path(entry.name_raw())?;
-		if !paths.insert(path.clone())
-		{
-			return Err(Status::failed_precondition(format!("ZIP内のパスが重複しています: {path}")));
-		}
 		let mut hasher = Sha256::new();
 		loop
 		{
@@ -219,15 +209,9 @@ fn stream_files(
 		.map_err(|error| Status::internal(format!("配布ZIPが不正です: {error}")))?;
 	let requested = requested_paths.iter().map(String::as_str).collect::<HashSet<_>>();
 	let mut indexes = HashMap::new();
-	for index in 0..archive.len()
+	for (index, path) in canonical_archive_files(&mut archive)?
 	{
-		let entry = archive.by_index(index)
-			.map_err(|error| Status::internal(format!("ZIPエントリを読めません: {error}")))?;
-		if !entry.is_dir()
-		{
-			let path = safe_archive_path(entry.name_raw())?;
-			if requested.contains(path.as_str()) { indexes.insert(path, index); }
-		}
+		if requested.contains(path.as_str()) { indexes.insert(path, index); }
 	}
 
 	let mut buffer = vec![0u8; FILE_CHUNK_SIZE];
@@ -259,6 +243,55 @@ fn stream_files(
 		})).map_err(|_| Status::cancelled("ダウンロードが中断されました"))?;
 	}
 	Ok(())
+}
+
+fn canonical_archive_files(archive: &mut ZipArchive<File>) -> Result<Vec<(usize, String)>, Status>
+{
+	let mut raw_files = Vec::new();
+	for index in 0..archive.len()
+	{
+		let entry = archive.by_index(index)
+			.map_err(|error| Status::internal(format!("ZIPエントリを読めません: {error}")))?;
+		if entry.is_dir() { continue; }
+		if entry.unix_mode().is_some_and(|mode| mode & 0o170000 == 0o120000)
+		{
+			return Err(Status::failed_precondition("ZIP内のシンボリックリンクは使用できません"));
+		}
+		raw_files.push((index, safe_archive_path(entry.name_raw())?));
+	}
+
+	let wrapper = single_game_wrapper(raw_files.iter().map(|(_, path)| path.as_str()));
+	let prefix = wrapper.as_ref().map(|value| format!("{value}/"));
+	let mut seen = HashSet::new();
+	let mut files = Vec::with_capacity(raw_files.len());
+	for (index, raw_path) in raw_files
+	{
+		let path = prefix.as_ref()
+			.and_then(|value| raw_path.strip_prefix(value))
+			.unwrap_or(&raw_path)
+			.to_string();
+		if path.eq_ignore_ascii_case(".gamelauncher-manifest.json")
+		{
+			return Err(Status::failed_precondition("ZIP内で予約済みのファイル名が使用されています"));
+		}
+		if !seen.insert(path.clone())
+		{
+			return Err(Status::failed_precondition(format!("ZIP内のパスが重複しています: {path}")));
+		}
+		files.push((index, path));
+	}
+	Ok(files)
+}
+
+fn single_game_wrapper<'a>(mut paths: impl Iterator<Item = &'a str> + Clone) -> Option<String>
+{
+	if paths.clone().any(|path| path.eq_ignore_ascii_case("meta.json")) { return None; }
+	let wrapper = paths.clone().find_map(|path| {
+		let (first, rest) = path.split_once('/')?;
+		rest.eq_ignore_ascii_case("meta.json").then(|| first.to_string())
+	})?;
+	let prefix = format!("{wrapper}/");
+	paths.all(|path| path.starts_with(&prefix)).then_some(wrapper)
 }
 
 fn safe_archive_path(raw_name: &[u8]) -> Result<String, Status>
@@ -314,6 +347,26 @@ mod tests
 	}
 
 	#[test]
+	fn strips_single_game_wrapper_from_manifest()
+	{
+		let root = test_directory("wrapped");
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&root).unwrap();
+		let archive_path = root.join("game.zip");
+		let output = File::create(&archive_path).unwrap();
+		let mut zip = zip::ZipWriter::new(output);
+		zip.start_file("wrapped/meta.json", SimpleFileOptions::default()).unwrap();
+		zip.write_all(b"{}").unwrap();
+		zip.start_file("wrapped/game.exe", SimpleFileOptions::default()).unwrap();
+		zip.write_all(b"game").unwrap();
+		zip.finish().unwrap();
+
+		let manifest = build_manifest(&archive_path, "game".into(), "1.0.0".into()).unwrap();
+		assert_eq!(manifest.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["game.exe", "meta.json"]);
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
 	fn rejects_unsafe_archive_paths()
 	{
 		assert!(safe_archive_path(b"../outside.txt").is_err());
@@ -351,6 +404,39 @@ mod tests
 		}
 		task.await.unwrap().unwrap();
 		assert_eq!(received, b"wanted");
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[tokio::test]
+	async fn streams_files_from_single_game_wrapper()
+	{
+		let root = test_directory("wrapped-stream");
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&root).unwrap();
+		let archive_path = root.join("game.zip");
+		let output = File::create(&archive_path).unwrap();
+		let mut zip = zip::ZipWriter::new(output);
+		zip.start_file("wrapped/meta.json", SimpleFileOptions::default()).unwrap();
+		zip.write_all(b"{}").unwrap();
+		zip.start_file("wrapped/game.exe", SimpleFileOptions::default()).unwrap();
+		zip.write_all(b"game").unwrap();
+		zip.finish().unwrap();
+
+		let (sender, mut receiver) = mpsc::channel(8);
+		let task_path = archive_path.clone();
+		let task = tokio::task::spawn_blocking(move || {
+			stream_files(&task_path, &["game.exe".into()], &sender)
+		});
+		let mut received = Vec::new();
+		while let Some(chunk) = receiver.recv().await
+		{
+			let chunk = chunk.unwrap();
+			assert_eq!(chunk.path, "game.exe");
+			received.extend(chunk.data);
+			if chunk.complete { break; }
+		}
+		task.await.unwrap().unwrap();
+		assert_eq!(received, b"game");
 		let _ = std::fs::remove_dir_all(root);
 	}
 }

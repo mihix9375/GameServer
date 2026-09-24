@@ -40,6 +40,20 @@ fn clean_stem(s: &str) -> String
 	s_clean.to_string()
 }
 
+fn resolve_meta_id(meta_id: &str, archive_or_directory_name: &str) -> Result<String, String>
+{
+	let candidate = if meta_id.trim().is_empty()
+	{
+		clean_stem(archive_or_directory_name)
+	}
+	else
+	{
+		meta_id.trim().to_string()
+	};
+	crate::net::normalize_game_id(&candidate)
+		.map_err(|error| error.message().to_string())
+}
+
 fn exe_exists(dir: &Path, exe_name: &str) -> bool
 {
 	if let Ok(entries) = fs::read_dir(dir)
@@ -113,9 +127,8 @@ fn write_games_json(games_dir: &Path)
 				{
 					if let Ok(mut meta) = serde_json::from_str::<Meta>(&content)
 					{
-						let cleaned = clean_stem(&name);
-						if meta.id.is_empty() || meta.id.chars().all(|c| c.is_ascii_digit()) || meta.id.contains('_') { meta.id = cleaned.clone(); }
-						meta.id = clean_stem(&meta.id);
+						let Ok(game_id) = resolve_meta_id(&meta.id, &name) else { continue; };
+						meta.id = game_id;
 						if meta.game.is_empty() { meta.game = format!("{}.exe", meta.id); }
 						let _ = fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
 						all_metas.push(meta);
@@ -158,9 +171,15 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 				{
 					if let Some(real_exe) = find_any_exe(&temp_extract_dir) { meta.game = real_exe; }
 				}
-				let cleaned_stem = clean_stem(&file_name);
-				if meta.id.is_empty() || meta.id.chars().all(|c| c.is_ascii_digit()) || meta.id.contains('_') { meta.id = cleaned_stem.clone(); }
-				meta.id = clean_stem(&meta.id);
+				meta.id = match resolve_meta_id(&meta.id, &file_name)
+				{
+					Ok(game_id) => game_id,
+					Err(error) => {
+						println!("Invalid game ID in {}: {}", file_name, error);
+						let _ = fs::remove_dir_all(&temp_extract_dir);
+						continue;
+					}
+				};
 				if meta.game.is_empty() { meta.game = format!("{}.exe", meta.id); }
 				if meta.title.is_empty()
 				{
@@ -188,4 +207,57 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 		}
 	}
 	write_games_json(&games);
+}
+
+#[cfg(test)]
+mod tests
+{
+	use super::*;
+	use std::io::Write;
+	use std::time::{SystemTime, UNIX_EPOCH};
+	use zip::write::SimpleFileOptions;
+
+	#[test]
+	fn preserves_explicit_meta_id()
+	{
+		assert_eq!(resolve_meta_id("high_score_game", "upload-name").unwrap(), "high_score_game");
+		assert_eq!(resolve_meta_id("123_game", "upload-name").unwrap(), "123_game");
+		assert_eq!(resolve_meta_id("123", "upload-name").unwrap(), "123");
+	}
+
+	#[test]
+	fn uses_clean_archive_name_only_when_meta_id_is_empty()
+	{
+		assert_eq!(resolve_meta_id("", "1780000000_MyGame").unwrap(), "MyGame");
+	}
+
+	#[test]
+	fn imports_game_under_explicit_meta_id()
+	{
+		let unique = SystemTime::now()
+			.duration_since(UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_nanos();
+		let root = std::env::temp_dir().join(format!("gameserver-meta-id-{}-{unique}", std::process::id()));
+		let temp = root.join("temp");
+		let games = root.join("games");
+		fs::create_dir_all(&temp).unwrap();
+		fs::create_dir_all(&games).unwrap();
+
+		let archive_file = fs::File::create(temp.join("uploaded-file-name.zip")).unwrap();
+		let mut archive = zip::ZipWriter::new(archive_file);
+		archive.start_file("meta.json", SimpleFileOptions::default()).unwrap();
+		archive.write_all(br#"{"id":"configured_game_id","title":"Test","game":"Game.exe","version":"1.0.0"}"#).unwrap();
+		archive.start_file("Game.exe", SimpleFileOptions::default()).unwrap();
+		archive.write_all(b"test executable").unwrap();
+		archive.finish().unwrap();
+
+		extract_games(root.clone(), games.clone());
+
+		assert!(games.join("configured_game_id").join("meta.json").is_file());
+		assert!(!games.join("uploaded-file-name").exists());
+		let list: Vec<Meta> = serde_json::from_str(&fs::read_to_string(games.join("games.json")).unwrap()).unwrap();
+		assert_eq!(list[0].id, "configured_game_id");
+		let _ = fs::remove_dir_all(root);
+	}
 }

@@ -81,6 +81,7 @@ SampleGame.zip
 ```
 
 - `id`はゲームを識別する固定値です。更新時も変更しないでください。
+- ZIPやフォルダーの名前にかかわらず、空でない`id`がServer上のゲームIDになります。`id`が空の場合だけZIP名を代用します。
 - `game`はZIP内の実行ファイルへの相対パスです。
 - `version`は `1.2.0` のように数字をピリオドで区切ります。先頭の `v` も受け付けます。
 - 同じ`id`の新しいZIPをアップロードするとゲーム本体を更新できます。
@@ -145,14 +146,13 @@ Serverは配布ZIPからファイルサイズとSHA-256を含むマニフェス�
 3. Unityへ次のGit URLからパッケージを追加します。
 
 ```text
-https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#v0.1.0
+https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#v0.1.3
 ```
 
 4. ゲームクリア時などに関数を呼び出します。
 
 ```csharp
 ScoreResult result = await RankingApi.SubmitScoreAsync(
-    "SampleGame",
     "high_score",
     playerName,
     score);
