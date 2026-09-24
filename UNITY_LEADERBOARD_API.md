@@ -10,6 +10,8 @@
 
 LauncherがUnity向けAPIを `http://127.0.0.1:50053` で提供します。Launcher終了時にはAPIも終了します。
 
+現在のLauncherは、URL内の`{game_id}`ではなくLauncherから実際に起動中のゲームIDをServerへ送ります。`{game_id}`は旧版クライアントとの互換性のためURLに残しています。通常はUnity Packageを使い、ゲームIDを指定しないAPIを利用してください。
+
 ## 一覧を取得
 
 ```http
