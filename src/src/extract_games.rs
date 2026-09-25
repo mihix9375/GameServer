@@ -99,35 +99,35 @@ fn write_games_json(games_dir: &Path)
 			if entry.path().is_dir()
 			{
 				let mut dir_path = entry.path();
-				let mut name = entry.file_name().to_string_lossy().to_string();
+				let name = entry.file_name().to_string_lossy().to_string();
 				if name.ends_with(".exe")
 				{
 					let clean_name = name.trim_end_matches(".exe");
 					if games_dir.join(clean_name).exists() || !dir_path.join("meta.json").exists() { let _ = fs::remove_dir_all(dir_path); }
 					continue;
 				}
-				let cleaned_name = clean_stem(&name);
-				if cleaned_name != name && !cleaned_name.is_empty()
-				{
-					let new_dir_path = games_dir.join(&cleaned_name);
-					if !new_dir_path.exists()
-					{
-						let _ = fs::rename(&dir_path, &new_dir_path);
-						dir_path = new_dir_path;
-						name = cleaned_name.clone();
-					}
-					else if new_dir_path != dir_path
-					{
-						let _ = fs::remove_dir_all(&dir_path);
-						continue;
-					}
-				}
-				let meta_path = dir_path.join("meta.json");
+				let mut meta_path = dir_path.join("meta.json");
 				if let Ok(content) = fs::read_to_string(&meta_path)
 				{
 					if let Ok(mut meta) = serde_json::from_str::<Meta>(&content)
 					{
 						let Ok(game_id) = resolve_meta_id(&meta.id, &name) else { continue; };
+						let expected_dir = games_dir.join(&game_id);
+						if dir_path != expected_dir
+						{
+							if expected_dir.exists()
+							{
+								println!("Duplicate game ID {} in {}", game_id, name);
+								continue;
+							}
+							if let Err(error) = fs::rename(&dir_path, &expected_dir)
+							{
+								println!("Could not align game directory {} to ID {}: {}", name, game_id, error);
+								continue;
+							}
+							dir_path = expected_dir;
+							meta_path = dir_path.join("meta.json");
+						}
 						meta.id = game_id;
 						if meta.game.is_empty() { meta.game = format!("{}.exe", meta.id); }
 						let _ = fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
@@ -247,17 +247,17 @@ mod tests
 		let archive_file = fs::File::create(temp.join("uploaded-file-name.zip")).unwrap();
 		let mut archive = zip::ZipWriter::new(archive_file);
 		archive.start_file("meta.json", SimpleFileOptions::default()).unwrap();
-		archive.write_all(br#"{"id":"configured_game_id","title":"Test","game":"Game.exe","version":"1.0.0"}"#).unwrap();
+		archive.write_all(br#"{"id":"123_configured_game","title":"Test","game":"Game.exe","version":"1.0.0"}"#).unwrap();
 		archive.start_file("Game.exe", SimpleFileOptions::default()).unwrap();
 		archive.write_all(b"test executable").unwrap();
 		archive.finish().unwrap();
 
 		extract_games(root.clone(), games.clone());
 
-		assert!(games.join("configured_game_id").join("meta.json").is_file());
+		assert!(games.join("123_configured_game").join("meta.json").is_file());
 		assert!(!games.join("uploaded-file-name").exists());
 		let list: Vec<Meta> = serde_json::from_str(&fs::read_to_string(games.join("games.json")).unwrap()).unwrap();
-		assert_eq!(list[0].id, "configured_game_id");
+		assert_eq!(list[0].id, "123_configured_game");
 		let _ = fs::remove_dir_all(root);
 	}
 }
