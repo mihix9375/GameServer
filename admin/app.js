@@ -1,4 +1,12 @@
-const state = { games: [], comments: [], status: null, token: sessionStorage.getItem("admin-token") || "" };
+const state = {
+  games: [],
+  comments: [],
+  status: null,
+  token: sessionStorage.getItem("admin-token") || "",
+  editorGameId: null,
+  rankingLoadedFor: null,
+  replacementFile: null,
+};
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -80,16 +88,26 @@ function renderGames() {
     const version = document.createElement("span"); version.className = "version"; version.textContent = `v${game.version || "--"}`;
     const id = document.createElement("p"); id.className = "game-id"; id.textContent = gameId(game);
     const actions = document.createElement("div"); actions.className = "game-actions";
-    const edit = document.createElement("button"); edit.className = "button secondary"; edit.textContent = "編集";
-    edit.addEventListener("click", () => openGameEditor(game));
-    const ranking = document.createElement("button"); ranking.className = "button secondary"; ranking.textContent = "ランキング";
-    ranking.addEventListener("click", () => openRankingEditor(game));
+    const edit = document.createElement("button"); edit.className = "button primary"; edit.textContent = "管理・編集";
+    edit.addEventListener("click", () => openGameManager(game));
     const notify = document.createElement("button"); notify.className = "button secondary"; notify.textContent = "更新通知を送る";
     notify.addEventListener("click", () => sendNotification(gameId(game), notify));
     const remove = document.createElement("button"); remove.className = "button danger"; remove.textContent = "削除";
     remove.addEventListener("click", () => deleteGame(game, remove));
-    head.append(title, version); actions.append(edit, ranking, notify, remove); row.append(head, id, actions); list.append(row);
+    head.append(title, version); actions.append(edit, notify, remove); row.append(head, id, actions); list.append(row);
   }
+}
+
+function createCommentRow(item) {
+  const row = document.createElement("article"); row.className = "comment-row";
+  const game = document.createElement("strong"); game.textContent = item.game_id;
+  const author = document.createElement("span"); author.textContent = item.author || "匿名";
+  const content = document.createElement("span"); content.className = "content"; content.textContent = item.content;
+  const date = document.createElement("span"); date.className = "muted"; date.textContent = formatDate(item.created_at);
+  const remove = document.createElement("button"); remove.className = "button danger"; remove.textContent = "削除";
+  remove.addEventListener("click", () => deleteComment(item, remove));
+  row.append(game, author, content, date, remove);
+  return row;
 }
 
 function renderComments() {
@@ -101,15 +119,21 @@ function renderComments() {
     const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = "コメントがありません"; list.append(empty); return;
   }
   for (const item of comments) {
-    const row = document.createElement("article"); row.className = "comment-row";
-    const game = document.createElement("strong"); game.textContent = item.game_id;
-    const author = document.createElement("span"); author.textContent = item.author || "匿名";
-    const content = document.createElement("span"); content.className = "content"; content.textContent = item.content;
-    const date = document.createElement("span"); date.className = "muted"; date.textContent = formatDate(item.created_at);
-    const remove = document.createElement("button"); remove.className = "button danger"; remove.textContent = "削除";
-    remove.addEventListener("click", () => deleteComment(item, remove));
-    row.append(game, author, content, date, remove); list.append(row);
+    list.append(createCommentRow(item));
   }
+}
+
+function renderGameComments() {
+  const list = $("#game-comments-list");
+  const query = $("#game-comment-search").value.trim().toLowerCase();
+  const comments = state.comments.filter((item) => item.game_id === state.editorGameId)
+    .filter((item) => `${item.author} ${item.content}`.toLowerCase().includes(query));
+  $("#game-comment-count").textContent = `${comments.length}件`;
+  list.replaceChildren();
+  if (!comments.length) {
+    const empty = document.createElement("p"); empty.className = "empty compact"; empty.textContent = "コメントがありません"; list.append(empty); return;
+  }
+  for (const item of comments) list.append(createCommentRow(item));
 }
 
 async function loadAll() {
@@ -117,6 +141,10 @@ async function loadAll() {
     const [status, games, comments] = await Promise.all([api("/api/status"), api("/api/games"), api("/api/comments")]);
     state.status = status; state.games = games; state.comments = comments;
     renderStatus(); renderGames(); renderComments();
+    if (state.editorGameId) {
+      const editorGame = selectedEditorGame();
+      if (editorGame) renderGameComments(); else closeGameManager();
+    }
     $("#game-count").textContent = games.length;
     $("#comment-count").textContent = comments.length;
     $("#login").classList.add("hidden");
@@ -134,20 +162,49 @@ async function sendNotification(id, button) {
   finally { button.disabled = false; }
 }
 
-function openGameEditor(game) {
+function fillGameDetails(game) {
   $("#edit-id").value = gameId(game);
-  $("#edit-heading").textContent = `${game.title || gameId(game)} を編集`;
   $("#edit-title").value = game.title || "";
   $("#edit-version").value = game.version || "";
   $("#edit-author").value = game.author || "";
   $("#edit-date").value = game.latestUpdate || game.latest_update || "";
   $("#edit-tags").value = Array.isArray(game.tags) ? game.tags.join(", ") : "";
   $("#edit-description").value = game.description || "";
-  $("#edit-modal").classList.remove("hidden");
 }
 
-function closeGameEditor() {
-  $("#edit-modal").classList.add("hidden");
+function selectedEditorGame() {
+  return state.games.find((game) => gameId(game) === state.editorGameId);
+}
+
+function setEditorTab(tabName) {
+  $$(".editor-tab").forEach((button) => button.classList.toggle("active", button.dataset.editorTab === tabName));
+  $$(".editor-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.editorPanel === tabName));
+  if (tabName === "ranking" && state.rankingLoadedFor !== state.editorGameId) loadEditorRankings();
+  if (tabName === "comments") renderGameComments();
+}
+
+function openGameManager(game, tabName = "details") {
+  state.editorGameId = gameId(game);
+  state.rankingLoadedFor = null;
+  state.replacementFile = null;
+  $("#game-editor-heading").textContent = game.title || state.editorGameId;
+  $("#game-editor-id").textContent = state.editorGameId;
+  $("#game-comment-search").value = "";
+  $("#replacement-upload-input").value = "";
+  $("#replacement-file-name").textContent = "ZIPはまだ選択されていません";
+  $("#replace-game-upload").disabled = true;
+  $("#ranking-fields").innerHTML = '<p class="empty compact">読み込んでいます...</p>';
+  fillGameDetails(game);
+  renderGameComments();
+  $("#game-modal").classList.remove("hidden");
+  setEditorTab(tabName);
+}
+
+function closeGameManager() {
+  $("#game-modal").classList.add("hidden");
+  state.editorGameId = null;
+  state.rankingLoadedFor = null;
+  state.replacementFile = null;
 }
 
 function rankingField(index, board = {}) {
@@ -178,22 +235,24 @@ function rankingField(index, board = {}) {
   return field;
 }
 
-async function openRankingEditor(game) {
-  const id = gameId(game);
+async function loadEditorRankings() {
+  const id = state.editorGameId;
+  if (!id) return;
+  const fields = $("#ranking-fields");
+  fields.innerHTML = '<p class="empty compact">読み込んでいます...</p>';
   try {
     const boards = await api(`/api/leaderboards/${encodeURIComponent(id)}`);
+    if (state.editorGameId !== id) return;
     $("#ranking-game-id").value = id;
-    $("#ranking-heading").textContent = `${game.title || id} のランキング`;
-    const fields = $("#ranking-fields");
     fields.replaceChildren(rankingField(0, boards[0]), rankingField(1, boards[1]));
-    $("#ranking-modal").classList.remove("hidden");
+    state.rankingLoadedFor = id;
   } catch (error) {
+    const message = document.createElement("p");
+    message.className = "empty compact error-text";
+    message.textContent = error.message;
+    fields.replaceChildren(message);
     toast(error.message, true);
   }
-}
-
-function closeRankingEditor() {
-  $("#ranking-modal").classList.add("hidden");
 }
 
 function readRankingField(field) {
@@ -219,7 +278,6 @@ async function saveRankings(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ leaderboards }),
     });
-    closeRankingEditor();
     toast(result.message);
     log(result.message);
   } catch (error) {
@@ -249,7 +307,12 @@ async function saveGame(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    closeGameEditor(); toast(result.message); log(result.message); await loadAll();
+    toast(result.message); log(result.message); await loadAll();
+    const updated = selectedEditorGame();
+    if (updated) {
+      $("#game-editor-heading").textContent = updated.title || id;
+      fillGameDetails(updated);
+    }
   } catch (error) { toast(error.message, true); log(`ゲーム更新失敗: ${error.message}`); }
   finally { button.disabled = false; }
 }
@@ -277,12 +340,49 @@ async function uploadGame(file, button) {
   finally { button.disabled = false; button.textContent = "ZIPをアップロード"; $("#game-upload-input").value = ""; }
 }
 
+function selectReplacementFile(file) {
+  if (!file) return;
+  if (!file.name.toLowerCase().endsWith(".zip")) {
+    state.replacementFile = null;
+    $("#replacement-file-name").textContent = "ZIPファイルを選択してください";
+    $("#replace-game-upload").disabled = true;
+    toast("ZIPファイルを選択してください", true);
+    return;
+  }
+  state.replacementFile = file;
+  $("#replacement-file-name").textContent = `${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
+  $("#replace-game-upload").disabled = false;
+}
+
+async function replaceGameArchive(button) {
+  const file = state.replacementFile;
+  const id = state.editorGameId;
+  if (!file || !id) return;
+  const form = new FormData(); form.append("game", file, file.name);
+  button.disabled = true;
+  button.textContent = "ZIPを更新中...";
+  log(`${id}: ${file.name} の再アップロードを開始しました`);
+  try {
+    const result = await api(`/api/games/${encodeURIComponent(id)}/upload`, { method: "POST", body: form });
+    toast(result.message); log(result.message); await loadAll();
+    state.replacementFile = null;
+    $("#replacement-upload-input").value = "";
+    $("#replacement-file-name").textContent = "更新が完了しました";
+  } catch (error) {
+    toast(error.message, true); log(`ZIP更新失敗: ${error.message}`);
+  } finally {
+    button.textContent = "このゲームのZIPを更新";
+    button.disabled = !state.replacementFile;
+  }
+}
+
 async function deleteComment(item, button) {
   if (!confirm(`${item.author || "匿名"} のコメントを削除しますか？`)) return;
   button.disabled = true;
   try {
     const result = await api(`/api/comments/${encodeURIComponent(item.id)}`, { method: "DELETE" });
     state.comments = state.comments.filter((comment) => comment.id !== item.id); renderComments();
+    if (state.editorGameId) renderGameComments();
     $("#comment-count").textContent = state.comments.length; toast(result.message); log(`${item.game_id}: ${result.message}`);
   } catch (error) { toast(error.message, true); button.disabled = false; }
 }
@@ -307,13 +407,24 @@ $("#game-upload-input").addEventListener("change", (event) => uploadGame(event.t
 $("#game-search").addEventListener("input", renderGames);
 $("#comment-search").addEventListener("input", renderComments);
 $("#edit-form").addEventListener("submit", saveGame);
-$("#close-edit").addEventListener("click", closeGameEditor);
-$("#cancel-edit").addEventListener("click", closeGameEditor);
-$("#edit-modal").addEventListener("click", (event) => { if (event.target === $("#edit-modal")) closeGameEditor(); });
 $("#ranking-form").addEventListener("submit", saveRankings);
-$("#close-ranking").addEventListener("click", closeRankingEditor);
-$("#cancel-ranking").addEventListener("click", closeRankingEditor);
-$("#ranking-modal").addEventListener("click", (event) => { if (event.target === $("#ranking-modal")) closeRankingEditor(); });
+$("#close-game-editor").addEventListener("click", closeGameManager);
+$("#game-modal").addEventListener("click", (event) => { if (event.target === $("#game-modal")) closeGameManager(); });
+$$('.editor-tab').forEach((button) => button.addEventListener("click", () => setEditorTab(button.dataset.editorTab)));
+$("#game-comment-search").addEventListener("input", renderGameComments);
+$("#archive-dropzone").addEventListener("click", () => $("#replacement-upload-input").click());
+$("#archive-dropzone").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); $("#replacement-upload-input").click(); }
+});
+$("#replacement-upload-input").addEventListener("change", (event) => selectReplacementFile(event.target.files?.[0]));
+for (const eventName of ["dragenter", "dragover"]) {
+  $("#archive-dropzone").addEventListener(eventName, (event) => { event.preventDefault(); $("#archive-dropzone").classList.add("dragging"); });
+}
+for (const eventName of ["dragleave", "drop"]) {
+  $("#archive-dropzone").addEventListener(eventName, (event) => { event.preventDefault(); $("#archive-dropzone").classList.remove("dragging"); });
+}
+$("#archive-dropzone").addEventListener("drop", (event) => selectReplacementFile(event.dataTransfer?.files?.[0]));
+$("#replace-game-upload").addEventListener("click", (event) => replaceGameArchive(event.currentTarget));
 $("#login-form").addEventListener("submit", async (event) => {
   event.preventDefault(); state.token = $("#token").value; sessionStorage.setItem("admin-token", state.token);
   $("#login-error").textContent = "";
