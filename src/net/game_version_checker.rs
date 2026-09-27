@@ -20,7 +20,12 @@ pub async fn handle_check_version(request: Request<VersionRequest>) -> Result<Re
 	let target_game = crate::net::normalize_game_id(&req.game_id)?;
 	let current_version = req.current_version;
 	let target_path = game_path.join(target_game);
-	println!("game id : {:?}", target_path);
+	tracing::debug!(
+		target: crate::logging::DETAIL_TARGET,
+		event = "version_path_resolved",
+		game_path = %target_path.display(),
+		current_version = %current_version,
+	);
 
 	let latest_version = search_game(target_path).await?;
 
@@ -46,13 +51,13 @@ async fn search_game(gamepath: PathBuf) -> Result<String, Status>
 		}
 		else
 		{
-			println!("Arent dir");
+			tracing::debug!(target: crate::logging::DETAIL_TARGET, event = "game_path_not_directory", path = %gamepath.display());
 			Err(Status::not_found(format!("ゲームがディレクトリではありません")))
 		}
 	}
 	else
 	{
-		println!("Couldnt find");
+		tracing::debug!(target: crate::logging::DETAIL_TARGET, event = "game_not_found", path = %gamepath.display());
 		Err(Status::not_found(format!("ゲームが存在しません")))
 	}
 }
@@ -81,13 +86,13 @@ async fn check_version(gamepath: PathBuf) -> Result<String, Status>
 		}
 		else
 		{
-			println!("Couldnt find meta file");
+			tracing::debug!(target: crate::logging::DETAIL_TARGET, event = "meta_path_not_file", path = %meta_file.display());
 			Err(Status::not_found(format!("metaファイルがありません")))
 		}
 	}
 	else
 	{
-		println!("Couldnt find meta file");
+		tracing::debug!(target: crate::logging::DETAIL_TARGET, event = "meta_not_found", path = %meta_file.display());
 		Err(Status::not_found(format!("metaファイルがありません")))
 	}
 }

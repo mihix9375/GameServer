@@ -40,7 +40,7 @@ pub fn spawn_monitor() -> Arc<broadcast::Sender<UpdateNotice>>
 						}).collect::<std::collections::HashSet<_>>();
 						if let Err(error) = crate::net::update_notice::clear_published_removals(&current_ids).await
 						{
-							eprintln!("削除履歴を更新できません: {error}");
+							tracing::warn!("削除履歴を更新できません: {error}");
 						}
 						for previous in &meta_cache
 						{
@@ -50,7 +50,7 @@ pub fn spawn_monitor() -> Arc<broadcast::Sender<UpdateNotice>>
 							{
 								if let Err(error) = crate::net::update_notice::record_removal(&clean_id).await
 								{
-									eprintln!("削除履歴を保存できません ({clean_id}): {error}");
+									tracing::warn!("削除履歴を保存できません ({clean_id}): {error}");
 								}
 								let _ = monitor_tx.send(crate::net::update_notice::delete_notice(clean_id));
 							}

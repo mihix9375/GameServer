@@ -2,12 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::sync::OnceLock;
+use std::task::{Context, Poll};
 use std::time::UNIX_EPOCH;
 
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex};
-use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
+use tonic::codegen::tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use zip::ZipArchive;
 
@@ -16,7 +18,29 @@ use crate::gamelauncher::{DownloadRequest, GameFile, GameFileData, GameFilesRequ
 const FILE_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 const STREAM_QUEUE_SIZE: usize = 8;
 
-pub type GameFileStream = ReceiverStream<Result<GameFileData, Status>>;
+pub struct GameFileStream
+{
+	inner: ReceiverStream<Result<GameFileData, Status>>,
+	client_ip: Option<String>,
+}
+
+impl Stream for GameFileStream
+{
+	type Item = Result<GameFileData, Status>;
+
+	fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>>
+	{
+		let this = self.get_mut();
+		match Pin::new(&mut this.inner).poll_next(context)
+		{
+			Poll::Ready(Some(Ok(chunk))) => {
+				crate::client_metrics::record(this.client_ip.as_deref(), chunk.data.len() as u64, 0);
+				Poll::Ready(Some(Ok(chunk)))
+			},
+			other => other,
+		}
+	}
+}
 
 #[derive(Clone)]
 struct CachedManifest
@@ -44,6 +68,7 @@ pub async fn handle_download_files(
 	request: Request<GameFilesRequest>,
 ) -> Result<Response<GameFileStream>, Status>
 {
+	let client_ip = crate::client_metrics::request_ip(&request);
 	let request = request.into_inner();
 	let game_id = crate::net::normalize_game_id(&request.game_id)?;
 	let (archive_path, version) = find_archive_and_version(&game_id).await?;
@@ -58,7 +83,7 @@ pub async fn handle_download_files(
 			let _ = sender.blocking_send(Err(error));
 		}
 	});
-	Ok(Response::new(ReceiverStream::new(receiver)))
+	Ok(Response::new(GameFileStream { inner: ReceiverStream::new(receiver), client_ip }))
 }
 
 async fn find_archive_and_version(game_id: &str) -> Result<(PathBuf, String), Status>

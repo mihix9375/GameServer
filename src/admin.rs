@@ -69,6 +69,8 @@ struct StatusResponse
 	uptime_seconds: u64,
 	games_directory: String,
 	comments_file: String,
+	leaderboards_file: String,
+	config_file: String,
 	remote_access: bool,
 }
 
@@ -211,8 +213,16 @@ async fn status(State(state): State<AdminState>, headers: HeaderMap) -> ApiResul
 		uptime_seconds: state.started_at.elapsed().as_secs(),
 		games_directory: state.root.join("games").display().to_string(),
 		comments_file: state.root.join("comments.jsonl").display().to_string(),
+		leaderboards_file: state.root.join("leaderboards.json").display().to_string(),
+		config_file: state.root.join("admin-config.json").display().to_string(),
 		remote_access: !address.ip().is_loopback(),
 	}))
+}
+
+async fn clients(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult<Vec<crate::client_metrics::ClientSnapshot>>
+{
+	authorize(&state, &headers)?;
+	Ok(Json(crate::client_metrics::snapshots()))
 }
 
 async fn get_leaderboards(
@@ -382,11 +392,14 @@ fn validate_uploaded_archive(path: &Path, expected_game_id: Option<&str>) -> Res
 	if archive.is_empty() { return Err("ZIPが空です".to_string()); }
 
 	let mut archive_game_id = None;
+	let mut meta_and_path = None;
 	let mut meta_count = 0;
+	let mut archive_paths = Vec::with_capacity(archive.len());
 	for index in 0..archive.len()
 	{
 		let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-		let name = crate::src::zip_utils::decode_filename(entry.name_raw());
+		let name = crate::src::zip_utils::decode_filename(entry.name_raw()).replace('\\', "/");
+		archive_paths.push(name.clone());
 		if name == "meta.json" || name.ends_with("/meta.json") || name.ends_with("\\meta.json")
 		{
 			meta_count += 1;
@@ -399,6 +412,37 @@ fn validate_uploaded_archive(path: &Path, expected_game_id: Option<&str>) -> Res
 			{
 				archive_game_id = Some(crate::net::normalize_game_id(&meta.id)
 					.map_err(|error| error.message().to_string())?);
+			}
+			meta_and_path = Some((meta, name));
+		}
+	}
+
+	if let Some((meta, meta_path)) = meta_and_path
+	{
+		let title_image = meta.title_image.trim().replace('\\', "/");
+		if !title_image.is_empty()
+			&& !title_image.starts_with("data:")
+			&& !title_image.starts_with("http://")
+			&& !title_image.starts_with("https://")
+		{
+			let image_path = Path::new(&title_image);
+			if image_path.is_absolute() || title_image.contains(':')
+				|| image_path.components().any(|part| !matches!(part, Component::Normal(_)))
+			{
+				return Err(format!("meta.jsonのtitleImageが不正です: {}", meta.title_image));
+			}
+			let meta_directory = meta_path.rsplit_once('/').map(|(directory, _)| directory);
+			let expected_image = match meta_directory
+			{
+				Some(directory) => format!("{directory}/{title_image}"),
+				None => title_image.clone(),
+			};
+			if !archive_paths.iter().any(|path| path.eq_ignore_ascii_case(&expected_image))
+			{
+				return Err(format!(
+					"meta.jsonのtitleImage「{}」がZIP内にありません（配置先: {expected_image}）",
+					meta.title_image
+				));
 			}
 		}
 	}
@@ -499,7 +543,7 @@ async fn update_game(
 	meta.title = update.title.trim().to_string();
 	meta.author = update.author.trim().to_string();
 	meta.version = update.version.trim().trim_start_matches(['v', 'V']).to_string();
-	meta.latest_update = update.latest_update.trim().to_string();
+	meta.latest_update = crate::init::normalize_meta_date(&update.latest_update);
 	meta.description = update.description.trim().to_string();
 	meta.tags = update.tags.into_iter().map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect();
 	let json = serde_json::to_string_pretty(&meta)
@@ -634,6 +678,7 @@ pub async fn serve(
 		.route("/app.css", get(css))
 		.route("/app.js", get(js))
 		.route("/api/status", get(status))
+		.route("/api/clients", get(clients))
 		.route("/api/games", get(games))
 		.route("/api/games/upload", post(upload_game).layer(DefaultBodyLimit::disable()))
 		.route("/api/games/{game_id}/upload", post(replace_game_archive).layer(DefaultBodyLimit::disable()))
@@ -646,7 +691,7 @@ pub async fn serve(
 		.with_state(state);
 	let listener = tokio::net::TcpListener::bind(address).await
 		.map_err(|error| format!("管理画面を{}で起動できません: {error}", config.bind))?;
-	println!("Admin UI listening on http://{}", config.bind);
+	tracing::info!("Admin UI listening on http://{}", config.bind);
 	axum::serve(listener, app).await.map_err(|error| error.to_string())
 }
 
@@ -692,5 +737,43 @@ mod tests
 		let error = validate_uploaded_archive(&path, Some("configured_game")).unwrap_err();
 		assert!(error.contains("meta.jsonが複数"));
 		let _ = std::fs::remove_dir_all(path.parent().unwrap());
+	}
+
+	#[test]
+	fn archive_rejects_a_missing_title_image()
+	{
+		let root = std::env::temp_dir().join(format!("gameserver-admin-missing-image-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&root).unwrap();
+		let path = root.join("game.zip");
+		let output = std::fs::File::create(&path).unwrap();
+		let mut archive = zip::ZipWriter::new(output);
+		archive.start_file("Wrapped/meta.json", SimpleFileOptions::default()).unwrap();
+		archive.write_all(br#"{"id":"game","game":"Game.exe","version":"1.0.0","titleImage":"image.png"}"#).unwrap();
+		archive.finish().unwrap();
+
+		let error = validate_uploaded_archive(&path, None).unwrap_err();
+		assert!(error.contains("titleImage"));
+		assert!(error.contains("Wrapped/image.png"));
+		let _ = std::fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn archive_accepts_a_title_image_next_to_nested_metadata()
+	{
+		let root = std::env::temp_dir().join(format!("gameserver-admin-valid-image-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&root).unwrap();
+		let path = root.join("game.zip");
+		let output = std::fs::File::create(&path).unwrap();
+		let mut archive = zip::ZipWriter::new(output);
+		archive.start_file("Wrapped/meta.json", SimpleFileOptions::default()).unwrap();
+		archive.write_all(br#"{"id":"game","game":"Game.exe","version":"1.0.0","titleImage":"images/title.png"}"#).unwrap();
+		archive.start_file("Wrapped/images/title.png", SimpleFileOptions::default()).unwrap();
+		archive.write_all(b"image").unwrap();
+		archive.finish().unwrap();
+
+		assert!(validate_uploaded_archive(&path, None).is_ok());
+		let _ = std::fs::remove_dir_all(root);
 	}
 }
