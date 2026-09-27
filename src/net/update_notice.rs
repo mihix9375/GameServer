@@ -97,12 +97,14 @@ pub async fn send_update_notice(
 	tx: &Arc<broadcast::Sender<UpdateNotice>>,
 ) -> Result<Response<UpdateNoticeStream>, Status>
 {
+	let client_ip = crate::client_metrics::request_ip(&request);
 	let installed_game_ids = request.into_inner().installed_game_ids;
 	let removed_game_ids = removed_game_ids().await.unwrap_or_default();
 	let mut rx = tx.subscribe();
 	let (tx_stream, rx_stream) = tokio::sync::mpsc::channel(32);
 
 	tokio::spawn(async move {
+		let _connection = crate::client_metrics::ConnectionGuard::new(client_ip.clone());
 		if let Ok(exe_path) = std::env::current_exe() {
 			if let Some(root) = exe_path.parent() {
 				let games_json = root.join("games").join("games.json");
@@ -127,9 +129,19 @@ pub async fn send_update_notice(
 			}
 		}
 
-		while let Ok(notice) = rx.recv().await {
-			if tx_stream.send(Ok(notice)).await.is_err() {
-				break;
+		let mut connection_check = tokio::time::interval(std::time::Duration::from_secs(2));
+		loop {
+			tokio::select! {
+				result = rx.recv() => match result {
+					Ok(notice) => {
+						if tx_stream.send(Ok(notice)).await.is_err() { break; }
+						crate::client_metrics::record(client_ip.as_deref(), 32, 0);
+					},
+					Err(_) => break,
+				},
+				_ = connection_check.tick() => {
+					if tx_stream.is_closed() { break; }
+				}
 			}
 		}
 	});

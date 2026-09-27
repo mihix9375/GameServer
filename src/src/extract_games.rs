@@ -117,12 +117,12 @@ fn write_games_json(games_dir: &Path)
 						{
 							if expected_dir.exists()
 							{
-								println!("Duplicate game ID {} in {}", game_id, name);
+								tracing::warn!("Duplicate game ID {} in {}", game_id, name);
 								continue;
 							}
 							if let Err(error) = fs::rename(&dir_path, &expected_dir)
 							{
-								println!("Could not align game directory {} to ID {}: {}", name, game_id, error);
+								tracing::warn!("Could not align game directory {} to ID {}: {}", name, game_id, error);
 								continue;
 							}
 							dir_path = expected_dir;
@@ -156,7 +156,7 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 				let _ = fs::remove_dir_all(&temp_extract_dir);
 				if let Err(e) = extract_zip_clean(&path, &temp_extract_dir)
 				{
-					println!("ZIP Extract Error {}: {}", file_name, e);
+					tracing::warn!("ZIP Extract Error {}: {}", file_name, e);
 					continue;
 				}
 				let mut meta = Meta::default();
@@ -175,7 +175,7 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 				{
 					Ok(game_id) => game_id,
 					Err(error) => {
-						println!("Invalid game ID in {}: {}", file_name, error);
+						tracing::warn!("Invalid game ID in {}: {}", file_name, error);
 						let _ = fs::remove_dir_all(&temp_extract_dir);
 						continue;
 					}
@@ -193,6 +193,7 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 				{
 					if let Some(Value::String(upd)) = meta.extra.remove("lastUpdate").or_else(|| meta.extra.remove("latest_update")) { meta.latest_update = upd; }
 				}
+				meta.latest_update = crate::init::normalize_meta_date(&meta.latest_update);
 				let game_dir = games.join(&meta.id);
 				let _ = fs::create_dir_all(&game_dir);
 				if let Ok(pretty_json) = serde_json::to_string_pretty(&meta)

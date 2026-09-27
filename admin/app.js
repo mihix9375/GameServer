@@ -1,6 +1,7 @@
 const state = {
   games: [],
   comments: [],
+  clients: [],
   status: null,
   token: sessionStorage.getItem("admin-token") || "",
   editorGameId: null,
@@ -56,6 +57,97 @@ function formatDate(seconds) {
   return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ja-JP");
 }
 
+function formatBytes(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = Number(bytes) || 0;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  const digits = value >= 100 || unit === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
+function formatRate(bytes) {
+  return `${formatBytes(bytes)}/s`;
+}
+
+function createClientStat(label, value) {
+  const stat = document.createElement("div"); stat.className = "client-stat";
+  const caption = document.createElement("span"); caption.textContent = label;
+  const content = document.createElement("strong"); content.textContent = value;
+  stat.append(caption, content);
+  return stat;
+}
+
+function chartPoints(history, field, maximum) {
+  if (!history.length) return "";
+  return history.map((point, index) => {
+    const x = history.length === 1 ? 0 : index * 600 / (history.length - 1);
+    const y = 142 - ((Number(point[field]) || 0) / maximum) * 134;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+}
+
+function createTrafficChart(client) {
+  const namespace = "http://www.w3.org/2000/svg";
+  const wrapper = document.createElement("div"); wrapper.className = "traffic-chart-wrap";
+  const svg = document.createElementNS(namespace, "svg");
+  svg.classList.add("traffic-chart"); svg.setAttribute("viewBox", "0 0 600 150"); svg.setAttribute("preserveAspectRatio", "none");
+  const maximum = Math.max(1, ...client.history.flatMap((point) => [point.sent_bytes, point.received_bytes]));
+  for (const y of [8, 41.5, 75, 108.5, 142]) {
+    const line = document.createElementNS(namespace, "line");
+    line.classList.add("grid"); line.setAttribute("x1", "0"); line.setAttribute("x2", "600"); line.setAttribute("y1", String(y)); line.setAttribute("y2", String(y));
+    svg.append(line);
+  }
+  const sent = document.createElementNS(namespace, "polyline"); sent.classList.add("sent-line"); sent.setAttribute("points", chartPoints(client.history, "sent_bytes", maximum));
+  const received = document.createElementNS(namespace, "polyline"); received.classList.add("received-line"); received.setAttribute("points", chartPoints(client.history, "received_bytes", maximum));
+  svg.append(sent, received);
+  const scale = document.createElement("div"); scale.className = "traffic-chart-scale";
+  for (const ratio of [1, .75, .5, .25, 0]) {
+    const label = document.createElement("span"); label.textContent = formatRate(maximum * ratio); scale.append(label);
+  }
+  wrapper.append(svg, scale);
+  return wrapper;
+}
+
+function renderClients() {
+  const clients = state.clients;
+  $("#connected-client-count").textContent = clients.length;
+  $("#aggregate-send-rate").textContent = formatRate(clients.reduce((sum, client) => sum + client.sent_bytes_per_second, 0));
+  $("#aggregate-receive-rate").textContent = formatRate(clients.reduce((sum, client) => sum + client.received_bytes_per_second, 0));
+  const list = $("#clients-list"); list.replaceChildren();
+  if (!clients.length) {
+    const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = "接続中のLauncherはありません"; list.append(empty); return;
+  }
+  for (const client of clients) {
+    const card = document.createElement("article"); card.className = "client-card";
+    const head = document.createElement("div"); head.className = "client-card-head";
+    const identity = document.createElement("div"); identity.className = "client-identity";
+    const dot = document.createElement("i"); dot.className = "client-online";
+    const ip = document.createElement("h3"); ip.textContent = client.ip;
+    const time = document.createElement("span"); time.className = "client-time";
+    time.textContent = `接続 ${formatDate(client.connected_since)}${client.connections > 1 ? `・${client.connections}接続` : ""}`;
+    identity.append(dot, ip); head.append(identity, time);
+    const stats = document.createElement("div"); stats.className = "client-stats";
+    stats.append(
+      createClientStat("送信速度", formatRate(client.sent_bytes_per_second)),
+      createClientStat("受信速度", formatRate(client.received_bytes_per_second)),
+      createClientStat("累計送信", formatBytes(client.total_sent_bytes)),
+      createClientStat("累計受信", formatBytes(client.total_received_bytes)),
+    );
+    card.append(head, stats, createTrafficChart(client)); list.append(card);
+  }
+}
+
+async function loadClients() {
+  try {
+    state.clients = await api("/api/clients");
+    renderClients();
+  } catch (error) {
+    if (!$("#login").classList.contains("hidden")) return;
+    console.warn("クライアント情報を取得できません:", error);
+  }
+}
+
 function gameId(game) {
   return (game.id || game.game || "").replace(/\.exe$/i, "");
 }
@@ -71,6 +163,8 @@ function renderStatus() {
   $("#leaderboard-api").textContent = `http://${data.leaderboard_api}`;
   $("#games-directory").textContent = data.games_directory;
   $("#comments-file").textContent = data.comments_file;
+  $("#leaderboards-file").textContent = data.leaderboards_file;
+  $("#config-file").textContent = data.config_file;
 }
 
 function renderGames() {
@@ -110,19 +204,6 @@ function createCommentRow(item) {
   return row;
 }
 
-function renderComments() {
-  const query = $("#comment-search").value.trim().toLowerCase();
-  const comments = state.comments.filter((item) => `${item.game_id} ${item.author} ${item.content}`.toLowerCase().includes(query));
-  const list = $("#comments-list");
-  list.replaceChildren();
-  if (!comments.length) {
-    const empty = document.createElement("p"); empty.className = "empty"; empty.textContent = "コメントがありません"; list.append(empty); return;
-  }
-  for (const item of comments) {
-    list.append(createCommentRow(item));
-  }
-}
-
 function renderGameComments() {
   const list = $("#game-comments-list");
   const query = $("#game-comment-search").value.trim().toLowerCase();
@@ -140,7 +221,7 @@ async function loadAll() {
   try {
     const [status, games, comments] = await Promise.all([api("/api/status"), api("/api/games"), api("/api/comments")]);
     state.status = status; state.games = games; state.comments = comments;
-    renderStatus(); renderGames(); renderComments();
+    renderStatus(); renderGames();
     if (state.editorGameId) {
       const editorGame = selectedEditorGame();
       if (editorGame) renderGameComments(); else closeGameManager();
@@ -381,7 +462,7 @@ async function deleteComment(item, button) {
   button.disabled = true;
   try {
     const result = await api(`/api/comments/${encodeURIComponent(item.id)}`, { method: "DELETE" });
-    state.comments = state.comments.filter((comment) => comment.id !== item.id); renderComments();
+    state.comments = state.comments.filter((comment) => comment.id !== item.id);
     if (state.editorGameId) renderGameComments();
     $("#comment-count").textContent = state.comments.length; toast(result.message); log(`${item.game_id}: ${result.message}`);
   } catch (error) { toast(error.message, true); button.disabled = false; }
@@ -397,15 +478,15 @@ async function rescan(button) {
 $$('.nav-item').forEach((button) => button.addEventListener("click", () => {
   $$('.nav-item').forEach((item) => item.classList.toggle("active", item === button));
   $$('.view').forEach((view) => view.classList.toggle("active", view.id === `view-${button.dataset.view}`));
-  const titles = { dashboard: "ダッシュボード", games: "配布ゲーム", comments: "コメント管理" };
+  const titles = { dashboard: "ダッシュボード", games: "配布ゲーム", clients: "クライアント" };
   $("#page-title").textContent = titles[button.dataset.view] || button.textContent.trim();
+  if (button.dataset.view === "clients") loadClients();
 }));
 $("#refresh-all").addEventListener("click", loadAll);
 $("#rescan").addEventListener("click", (event) => rescan(event.currentTarget));
 $("#upload-game").addEventListener("click", () => $("#game-upload-input").click());
 $("#game-upload-input").addEventListener("change", (event) => uploadGame(event.target.files?.[0], $("#upload-game")));
 $("#game-search").addEventListener("input", renderGames);
-$("#comment-search").addEventListener("input", renderComments);
 $("#edit-form").addEventListener("submit", saveGame);
 $("#ranking-form").addEventListener("submit", saveRankings);
 $("#close-game-editor").addEventListener("click", closeGameManager);
@@ -435,3 +516,6 @@ loadAll();
 setInterval(() => {
   if (state.status) { state.status.uptime_seconds += 30; renderStatus(); }
 }, 30000);
+setInterval(() => {
+  if ($("#view-clients").classList.contains("active")) loadClients();
+}, 1000);

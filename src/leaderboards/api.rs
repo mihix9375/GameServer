@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -41,15 +41,20 @@ fn bad_request(message: String) -> (StatusCode, Json<ErrorResponse>)
 
 async fn list_leaderboards(
 	State(store): State<LeaderboardStore>,
+	ConnectInfo(address): ConnectInfo<SocketAddr>,
 	Path(game_id): Path<String>,
 ) -> ApiResult<GameLeaderboards>
 {
 	validate_game_id(&game_id).map_err(bad_request)?;
-	Ok(Json(store.get(&game_id).await))
+	let response = store.get(&game_id).await;
+	let response_bytes = serde_json::to_vec(&response).map_or(0, |value| value.len() as u64);
+	crate::client_metrics::record_ip(address.ip(), response_bytes, game_id.len() as u64);
+	Ok(Json(response))
 }
 
 async fn submit_score(
 	State(store): State<LeaderboardStore>,
+	ConnectInfo(address): ConnectInfo<SocketAddr>,
 	Path((game_id, board_id)): Path<(String, String)>,
 	Json(request): Json<SubmitScoreRequest>,
 ) -> ApiResult<SubmitScoreResponse>
@@ -58,7 +63,11 @@ async fn submit_score(
 		.submit(&game_id, &board_id, &request.player_name, request.score)
 		.await
 		.map_err(bad_request)?;
-	Ok(Json(SubmitScoreResponse { ok: true, rank }))
+	let response = SubmitScoreResponse { ok: true, rank };
+	let received_bytes = (game_id.len() + board_id.len() + request.player_name.len() + std::mem::size_of::<i64>()) as u64;
+	let sent_bytes = serde_json::to_vec(&response).map_or(0, |value| value.len() as u64);
+	crate::client_metrics::record_ip(address.ip(), sent_bytes, received_bytes);
+	Ok(Json(response))
 }
 
 pub async fn serve(store: LeaderboardStore, bind: &str) -> Result<(), String>
@@ -72,6 +81,6 @@ pub async fn serve(store: LeaderboardStore, bind: &str) -> Result<(), String>
 	let listener = tokio::net::TcpListener::bind(address).await
 		.map_err(|error| format!("ランキングAPIを{bind}で起動できません: {error}"))?;
 
-	println!("Leaderboard API listening on http://{bind}");
-	axum::serve(listener, app).await.map_err(|error| error.to_string())
+	tracing::info!("Leaderboard API listening on http://{bind}");
+	axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.map_err(|error| error.to_string())
 }

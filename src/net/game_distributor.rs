@@ -2,7 +2,7 @@ use tonic::{
 	Response, Request, Status
 };
 use tokio::io::AsyncReadExt;
-use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
+use tonic::codegen::tokio_stream::{Stream, wrappers::ReceiverStream};
 use crate::gamelauncher::{
 	DownloadRequest, GameData
 };
@@ -12,11 +12,36 @@ use std::path::PathBuf;
 use serde_json;
 use crate::init::Meta;
 use std::ffi::OsStr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-pub type DownloadStream = ReceiverStream<Result<GameData, Status>>;
+pub struct DownloadStream
+{
+	inner: ReceiverStream<Result<GameData, Status>>,
+	client_ip: Option<String>,
+}
+
+impl Stream for DownloadStream
+{
+	type Item = Result<GameData, Status>;
+
+	fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>>
+	{
+		let this = self.get_mut();
+		match Pin::new(&mut this.inner).poll_next(context)
+		{
+			Poll::Ready(Some(Ok(chunk))) => {
+				crate::client_metrics::record(this.client_ip.as_deref(), chunk.data.len() as u64, 0);
+				Poll::Ready(Some(Ok(chunk)))
+			},
+			other => other,
+		}
+	}
+}
 
 pub async fn handle_game_distributor(request: Request<DownloadRequest>) -> Result<Response<DownloadStream>, Status>
 {
+	let client_ip = crate::client_metrics::request_ip(&request);
 	let exe_path 	= env::current_exe().expect("Couldnt get exe path");
 	let root 		= exe_path.parent().expect("Couldnt get root path");
 	let game_path	= root.join("games");
@@ -24,7 +49,13 @@ pub async fn handle_game_distributor(request: Request<DownloadRequest>) -> Resul
 	let (tx, rx)	= tokio::sync::mpsc::channel(32);
 
 	let req 		= request.into_inner();
-	println!("game id: {}", req.game_id);
+	tracing::debug!(
+		target: crate::logging::DETAIL_TARGET,
+		event = "download_resolved",
+		game_id = %req.game_id,
+		version = %req.version,
+		client_ip = client_ip.as_deref().unwrap_or("unknown"),
+	);
 
 	let clean_id = crate::net::normalize_game_id(&req.game_id)?;
 	let mut target_path = game_path.join(&clean_id);
@@ -135,7 +166,7 @@ pub async fn handle_game_distributor(request: Request<DownloadRequest>) -> Resul
 		}
 	});
 
-	Ok(Response::new(ReceiverStream::new(rx)))
+	Ok(Response::new(DownloadStream { inner: ReceiverStream::new(rx), client_ip }))
 }
 	
 async fn search_game(path: PathBuf) -> Result<(), Status>
@@ -143,7 +174,7 @@ async fn search_game(path: PathBuf) -> Result<(), Status>
 	if path.exists() && path.is_dir() { Ok(()) }
 	else
 	{
-		println!("ゲームが存在しません"); 
+		tracing::debug!(target: crate::logging::DETAIL_TARGET, event = "game_not_found", path = %path.display());
 		Err(Status::not_found("ゲームが存在しません"))
 	}
 }
