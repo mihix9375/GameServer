@@ -87,41 +87,64 @@
       <small id="login-error"></small>
     </form>
   </div>
-  <div id="edit-modal" class="dialog hidden">
-    <form id="edit-form" class="dialog-card">
+  <div id="game-modal" class="dialog hidden">
+    <div class="dialog-card game-manager-card">
       <div class="dialog-head">
-        <div><p class="eyebrow">GAME METADATA</p><h2 id="edit-heading">ゲーム情報を編集</h2></div>
-        <button id="close-edit" class="icon-button" type="button" aria-label="閉じる">×</button>
+        <div><p class="eyebrow">GAME MANAGEMENT</p><h2 id="game-editor-heading">ゲーム管理</h2><p id="game-editor-id" class="game-editor-id"></p></div>
+        <button id="close-game-editor" class="icon-button" type="button" aria-label="閉じる">×</button>
       </div>
-      <input id="edit-id" type="hidden">
-      <div class="form-grid">
-        <label><span>タイトル *</span><input id="edit-title" required maxlength="120"></label>
-        <label><span>バージョン *</span><input id="edit-version" required placeholder="1.0.0"></label>
-        <label><span>作者</span><input id="edit-author" maxlength="120"></label>
-        <label><span>更新日</span><input id="edit-date" placeholder="2026/09/21"></label>
-        <label class="wide"><span>タグ（カンマ区切り）</span><input id="edit-tags"></label>
-        <label class="wide"><span>説明</span><textarea id="edit-description" rows="5"></textarea></label>
+      <nav class="editor-tabs" aria-label="ゲーム管理メニュー">
+        <button class="editor-tab active" type="button" data-editor-tab="details">詳細</button>
+        <button class="editor-tab" type="button" data-editor-tab="ranking">ランキング</button>
+        <button class="editor-tab" type="button" data-editor-tab="comments">コメント</button>
+        <button class="editor-tab" type="button" data-editor-tab="archive">ZIP再アップロード</button>
+      </nav>
+
+      <div class="editor-panels">
+        <section class="editor-panel active" data-editor-panel="details">
+          <form id="edit-form">
+            <input id="edit-id" type="hidden">
+            <div class="form-grid">
+              <label><span>タイトル *</span><input id="edit-title" required maxlength="120"></label>
+              <label><span>バージョン *</span><input id="edit-version" required placeholder="1.0.0"></label>
+              <label><span>作者</span><input id="edit-author" maxlength="120"></label>
+              <label><span>更新日</span><input id="edit-date" placeholder="2026/09/21"></label>
+              <label class="wide"><span>タグ（カンマ区切り）</span><input id="edit-tags"></label>
+              <label class="wide"><span>説明</span><textarea id="edit-description" rows="7"></textarea></label>
+            </div>
+            <div class="dialog-actions"><button id="save-edit" class="button primary" type="submit">詳細を保存</button></div>
+          </form>
+        </section>
+
+        <section class="editor-panel" data-editor-panel="ranking">
+          <form id="ranking-form">
+            <input id="ranking-game-id" type="hidden">
+            <p class="form-note">Unityから投稿・取得できるランキングを最大2つ設定できます。IDを変更すると別ランキングとして扱われます。</p>
+            <div id="ranking-fields" class="ranking-fields"><p class="empty compact">読み込んでいます...</p></div>
+            <div class="dialog-actions"><button id="save-ranking" class="button primary" type="submit">ランキング設定を保存</button></div>
+          </form>
+        </section>
+
+        <section class="editor-panel" data-editor-panel="comments">
+          <div class="editor-section-head">
+            <div><h3>このゲームのコメント</h3><span id="game-comment-count" class="muted">0件</span></div>
+            <input id="game-comment-search" class="search" placeholder="名前・本文で検索">
+          </div>
+          <div id="game-comments-list" class="comments-list editor-comments-list"></div>
+        </section>
+
+        <section class="editor-panel" data-editor-panel="archive">
+          <div id="archive-dropzone" class="archive-dropzone" tabindex="0" role="button" aria-label="更新用ZIPを選択">
+            <strong>更新用ZIPをドロップ</strong>
+            <span>またはクリックしてファイルを選択</span>
+            <small id="replacement-file-name">ZIPはまだ選択されていません</small>
+          </div>
+          <input id="replacement-upload-input" type="file" accept=".zip,application/zip" hidden>
+          <p class="form-note archive-note">ZIP内のmeta.jsonのIDが、選択中ゲームのIDと一致する場合だけ更新します。ゲームIDは変更されません。</p>
+          <div class="dialog-actions"><button id="replace-game-upload" class="button primary" type="button" disabled>このゲームのZIPを更新</button></div>
+        </section>
       </div>
-      <div class="dialog-actions">
-        <button id="cancel-edit" class="button secondary" type="button">キャンセル</button>
-        <button id="save-edit" class="button primary" type="submit">変更を保存</button>
-      </div>
-    </form>
-  </div>
-  <div id="ranking-modal" class="dialog hidden">
-    <form id="ranking-form" class="dialog-card">
-      <div class="dialog-head">
-        <div><p class="eyebrow">LEADERBOARDS</p><h2 id="ranking-heading">ランキング設定</h2></div>
-        <button id="close-ranking" class="icon-button" type="button" aria-label="閉じる">×</button>
-      </div>
-      <input id="ranking-game-id" type="hidden">
-      <p class="form-note">Unityから投稿・取得できるランキングを最大2つ設定できます。IDは後から変更すると別ランキング扱いになります。</p>
-      <div id="ranking-fields" class="ranking-fields"></div>
-      <div class="dialog-actions">
-        <button id="cancel-ranking" class="button secondary" type="button">キャンセル</button>
-        <button id="save-ranking" class="button primary" type="submit">設定を保存</button>
-      </div>
-    </form>
+    </div>
   </div>
   <div id="toast" class="toast"></div>
 </body>

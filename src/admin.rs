@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -322,14 +323,11 @@ fn find_distribution_zip(game_directory: &Path, game_id: &str) -> Result<PathBuf
 	}
 }
 
-async fn upload_game(
-	State(state): State<AdminState>,
-	headers: HeaderMap,
+async fn store_uploaded_archive(
+	state: &AdminState,
 	mut multipart: Multipart,
-) -> ApiResult<ActionResponse>
+) -> Result<PathBuf, (StatusCode, Json<ActionResponse>)>
 {
-	authorize(&state, &headers)?;
-	let _guard = state.operation_lock.lock().await;
 	let temp_directory = state.root.join("temp");
 	tokio::fs::create_dir_all(&temp_directory).await
 		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("tempフォルダーを作成できません: {error}")))?;
@@ -374,14 +372,60 @@ async fn upload_game(
 		uploaded_path = Some(destination);
 		break;
 	}
-	let uploaded_path = uploaded_path.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "アップロードするZIPを選択してください"))?;
+	uploaded_path.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "アップロードするZIPを選択してください"))
+}
+
+fn validate_uploaded_archive(path: &Path, expected_game_id: Option<&str>) -> Result<(), String>
+{
+	let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+	let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+	if archive.is_empty() { return Err("ZIPが空です".to_string()); }
+
+	let mut archive_game_id = None;
+	let mut meta_count = 0;
+	for index in 0..archive.len()
+	{
+		let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+		let name = crate::src::zip_utils::decode_filename(entry.name_raw());
+		if name == "meta.json" || name.ends_with("/meta.json") || name.ends_with("\\meta.json")
+		{
+			meta_count += 1;
+			if meta_count > 1 { return Err("ZIP内にmeta.jsonが複数あります".to_string()); }
+			let mut content = String::new();
+			entry.read_to_string(&mut content).map_err(|error| error.to_string())?;
+			let meta: Meta = serde_json::from_str(&content)
+				.map_err(|error| format!("meta.jsonが不正です: {error}"))?;
+			if !meta.id.trim().is_empty()
+			{
+				archive_game_id = Some(crate::net::normalize_game_id(&meta.id)
+					.map_err(|error| error.message().to_string())?);
+			}
+		}
+	}
+
+	if let Some(expected) = expected_game_id
+	{
+		let actual = archive_game_id.ok_or_else(|| "再アップロードするZIPのmeta.jsonにはidが必要です".to_string())?;
+		if actual != expected
+		{
+			return Err(format!("ゲームIDが一致しません（選択中: {expected} / ZIP: {actual}）"));
+		}
+	}
+	Ok(())
+}
+
+async fn import_uploaded_archive(
+	state: &AdminState,
+	uploaded_path: PathBuf,
+	expected_game_id: Option<&str>,
+) -> ApiResult<ActionResponse>
+{
 	let validation_path = uploaded_path.clone();
-	let valid_zip = tokio::task::spawn_blocking(move || {
-		let file = std::fs::File::open(validation_path).map_err(|error| error.to_string())?;
-		let archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
-		if archive.is_empty() { Err("ZIPが空です".to_string()) } else { Ok(()) }
+	let expected = expected_game_id.map(str::to_string);
+	let validation = tokio::task::spawn_blocking(move || {
+		validate_uploaded_archive(&validation_path, expected.as_deref())
 	}).await.map_err(|error| error.to_string()).and_then(|result| result);
-	if let Err(error) = valid_zip
+	if let Err(error) = validation
 	{
 		let _ = tokio::fs::remove_file(&uploaded_path).await;
 		return Err(api_error(StatusCode::BAD_REQUEST, format!("有効なZIPではありません: {error}")));
@@ -395,7 +439,38 @@ async fn upload_game(
 		let _ = tokio::fs::remove_file(uploaded_path).await;
 		return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, "ゲームを配布一覧へ取り込めませんでした"));
 	}
-	Ok(Json(ActionResponse { ok: true, message: "ゲームをアップロードし、配布一覧へ反映しました".to_string() }))
+	let message = match expected_game_id
+	{
+		Some(game_id) => format!("{game_id}のZIPを更新し、配布一覧へ反映しました"),
+		None => "ゲームをアップロードし、配布一覧へ反映しました".to_string(),
+	};
+	Ok(Json(ActionResponse { ok: true, message }))
+}
+
+async fn upload_game(
+	State(state): State<AdminState>,
+	headers: HeaderMap,
+	multipart: Multipart,
+) -> ApiResult<ActionResponse>
+{
+	authorize(&state, &headers)?;
+	let _guard = state.operation_lock.lock().await;
+	let uploaded_path = store_uploaded_archive(&state, multipart).await?;
+	import_uploaded_archive(&state, uploaded_path, None).await
+}
+
+async fn replace_game_archive(
+	State(state): State<AdminState>,
+	headers: HeaderMap,
+	AxumPath(game_id): AxumPath<String>,
+	multipart: Multipart,
+) -> ApiResult<ActionResponse>
+{
+	authorize(&state, &headers)?;
+	let _guard = state.operation_lock.lock().await;
+	let clean_id = existing_game_id(&state, &game_id)?;
+	let uploaded_path = store_uploaded_archive(&state, multipart).await?;
+	import_uploaded_archive(&state, uploaded_path, Some(&clean_id)).await
 }
 
 async fn update_game(
@@ -561,6 +636,7 @@ pub async fn serve(
 		.route("/api/status", get(status))
 		.route("/api/games", get(games))
 		.route("/api/games/upload", post(upload_game).layer(DefaultBodyLimit::disable()))
+		.route("/api/games/{game_id}/upload", post(replace_game_archive).layer(DefaultBodyLimit::disable()))
 		.route("/api/games/{game_id}", patch(update_game).delete(delete_game))
 		.route("/api/leaderboards/{game_id}", get(get_leaderboards).put(update_leaderboards))
 		.route("/api/comments", get(comments))
@@ -572,4 +648,49 @@ pub async fn serve(
 		.map_err(|error| format!("管理画面を{}で起動できません: {error}", config.bind))?;
 	println!("Admin UI listening on http://{}", config.bind);
 	axum::serve(listener, app).await.map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests
+{
+	use super::*;
+	use std::io::Write;
+	use zip::write::SimpleFileOptions;
+
+	fn test_archive(name: &str, meta_ids: &[&str]) -> PathBuf
+	{
+		let root = std::env::temp_dir().join(format!("gameserver-admin-{name}-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&root);
+		std::fs::create_dir_all(&root).unwrap();
+		let path = root.join("game.zip");
+		let output = std::fs::File::create(&path).unwrap();
+		let mut archive = zip::ZipWriter::new(output);
+		for (index, id) in meta_ids.iter().enumerate()
+		{
+			let entry = if index == 0 { "meta.json".to_string() } else { format!("nested-{index}/meta.json") };
+			archive.start_file(entry, SimpleFileOptions::default()).unwrap();
+			archive.write_all(format!(r#"{{"id":"{id}","game":"Game.exe","version":"1.0.0"}}"#).as_bytes()).unwrap();
+		}
+		archive.finish().unwrap();
+		path
+	}
+
+	#[test]
+	fn replacement_archive_must_match_selected_game()
+	{
+		let path = test_archive("matching", &["configured_game"]);
+		assert!(validate_uploaded_archive(&path, Some("configured_game")).is_ok());
+		let error = validate_uploaded_archive(&path, Some("different_game")).unwrap_err();
+		assert!(error.contains("ゲームIDが一致しません"));
+		let _ = std::fs::remove_dir_all(path.parent().unwrap());
+	}
+
+	#[test]
+	fn replacement_archive_rejects_multiple_metadata_files()
+	{
+		let path = test_archive("duplicate-meta", &["configured_game", "configured_game"]);
+		let error = validate_uploaded_archive(&path, Some("configured_game")).unwrap_err();
+		assert!(error.contains("meta.jsonが複数"));
+		let _ = std::fs::remove_dir_all(path.parent().unwrap());
+	}
 }
