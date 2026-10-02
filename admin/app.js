@@ -301,7 +301,7 @@ function rankingField(index, board = {}) {
     </div>`;
   const enabled = field.querySelector('[data-role="enabled"]');
   const controls = [...field.querySelectorAll('[data-role="id"], [data-role="name"], [data-role="order"]')];
-  enabled.checked = Boolean(board.id);
+  enabled.checked = board.enabled ?? Boolean(board.id);
   field.querySelector('[data-role="id"]').value = board.id || "";
   field.querySelector('[data-role="name"]').value = board.name || "";
   field.querySelector('[data-role="order"]').value = board.order || "high_score";
@@ -341,15 +341,14 @@ function readRankingField(field) {
     id: field.querySelector('[data-role="id"]').value.trim(),
     name: field.querySelector('[data-role="name"]').value.trim(),
     order: field.querySelector('[data-role="order"]').value,
+    enabled: field.querySelector('[data-role="enabled"]').checked,
   };
 }
 
 async function saveRankings(event) {
   event.preventDefault();
   const id = $("#ranking-game-id").value;
-  const leaderboards = $$(".ranking-field")
-    .filter((field) => field.querySelector('[data-role="enabled"]').checked)
-    .map(readRankingField);
+  const leaderboards = $$(".ranking-field").map(readRankingField);
   const button = $("#save-ranking");
   button.disabled = true;
 

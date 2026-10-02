@@ -38,7 +38,7 @@ Unityゲーム
   └─ GameServer :50051（管理画面）
 ```
 
-通常、ゲーム制作者が知る必要があるのは`meta.json`のゲームIDと、管理画面で設定したランキングIDだけです。
+ゲーム側のランキングAPIにはゲームIDやServerのIPアドレスを渡しません。Launcherが起動セッションから対象ゲームを安全に特定します。
 
 ## すぐに起動する
 
@@ -152,21 +152,27 @@ Serverは配布ZIPからファイルサイズとSHA-256を含むマニフェス�
 
 ゲームごとに最大2つ、`high_score`（大きい値が上位）または`low_score`（小さい値が上位）のランキングを設定できます。
 
-1. 管理画面で対象ゲームの「ランキング」を開きます。
-2. ランキングID、表示名、並び順を設定します。
-3. Unityへ次のGit URLからパッケージを追加します。
+> [!IMPORTANT]
+> ランキングAPI v0.2.0は旧APIと後方互換性がありません。ゲーム側は`game_id`や自由文字列のランキングIDを送らず、GameLauncherが発行するセッショントークンと固定スロット`0`・`1`を使用します。GameServer v0.5.0、GameLauncher v0.6.0、UPMパッケージ v0.2.0を組み合わせてください。
+
+1. Unityへ次のGit URLからパッケージを追加します。
 
 ```text
-https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#v0.1.3
+https://github.com/mihix9375/GameLauncher-Unity-Ranking.git#v0.2.0
 ```
 
-4. ゲームクリア時などに関数を呼び出します。
+2. ゲームの初期化時などにランキングを作成します。
 
 ```csharp
-ScoreResult result = await RankingApi.SubmitScoreAsync(
-    "high_score",
-    playerName,
-    score);
+var ranks = await RankingApi.SyncLeaderboardsAsync();
+await ranks[0].SetAsync("ハイスコア", RankingOrder.HighScore);
+await ranks[0].EnableAsync();
+```
+
+3. ゲームクリア時などにスコア送信関数を呼び出します。
+
+```csharp
+ScoreResult result = await ranks[0].InsertAsync(playerName, score);
 ```
 
 Unity側の導入方法は [GameLauncher-Unity-Ranking](https://github.com/mihix9375/GameLauncher-Unity-Ranking) を参照してください。HTTPエンドポイントとJSON形式は [UNITY_LEADERBOARD_API.md](UNITY_LEADERBOARD_API.md) に記載しています。
