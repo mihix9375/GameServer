@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use super::{validate_game_id, GameLeaderboards, LeaderboardStore};
+use super::{validate_game_id, GameLeaderboards, LeaderboardStore, SlotDefinition};
 
 const LIST_ROUTE: &str = "/v1/games/{game_id}/leaderboards";
 const SUBMIT_ROUTE: &str = "/v1/games/{game_id}/leaderboards/{board_id}/scores";
@@ -70,12 +70,33 @@ async fn submit_score(
 	Ok(Json(response))
 }
 
+#[derive(Debug, Deserialize)]
+struct SyncLeaderboardsRequest
+{
+	leaderboards: Vec<SlotDefinition>,
+}
+
+async fn sync_leaderboards(
+	State(store): State<LeaderboardStore>,
+	ConnectInfo(address): ConnectInfo<SocketAddr>,
+	Path(game_id): Path<String>,
+	Json(request): Json<SyncLeaderboardsRequest>,
+) -> ApiResult<GameLeaderboards>
+{
+	let received_bytes = game_id.len() as u64
+		+ serde_json::to_vec(&request.leaderboards).map_or(0, |value| value.len() as u64);
+	let response = store.sync_slots(&game_id, request.leaderboards).await.map_err(bad_request)?;
+	let sent_bytes = serde_json::to_vec(&response).map_or(0, |value| value.len() as u64);
+	crate::client_metrics::record_ip(address.ip(), sent_bytes, received_bytes);
+	Ok(Json(response))
+}
+
 pub async fn serve(store: LeaderboardStore, bind: &str) -> Result<(), String>
 {
 	let address: SocketAddr = bind.parse()
 		.map_err(|error| format!("admin-config.jsonのleaderboard_bindが不正です: {error}"))?;
 	let app = Router::new()
-		.route(LIST_ROUTE, get(list_leaderboards))
+		.route(LIST_ROUTE, get(list_leaderboards).put(sync_leaderboards))
 		.route(SUBMIT_ROUTE, post(submit_score))
 		.with_state(store);
 	let listener = tokio::net::TcpListener::bind(address).await

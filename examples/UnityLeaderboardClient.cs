@@ -6,6 +6,7 @@ using UnityEngine.Networking;
 public sealed class UnityLeaderboardClient : MonoBehaviour
 {
     private const string LauncherApi = "http://127.0.0.1:50053";
+	private static string SessionToken => Environment.GetEnvironmentVariable("GAMELAUNCHER_SESSION_TOKEN");
 
     [Serializable] public sealed class ScoreEntry
     {
@@ -25,7 +26,6 @@ public sealed class UnityLeaderboardClient : MonoBehaviour
 
     [Serializable] public sealed class LeaderboardResponse
     {
-        public string game_id;
         public Leaderboard[] leaderboards;
     }
 
@@ -41,10 +41,11 @@ public sealed class UnityLeaderboardClient : MonoBehaviour
         public int rank;
     }
 
-    public IEnumerator GetLeaderboards(string gameId, Action<LeaderboardResponse> onSuccess, Action<string> onError)
+    public IEnumerator GetLeaderboards(Action<LeaderboardResponse> onSuccess, Action<string> onError)
     {
-        string url = $"{LauncherApi}/v1/games/{UnityWebRequest.EscapeURL(gameId)}/leaderboards";
+        string url = $"{LauncherApi}/v1/leaderboards";
         using var request = UnityWebRequest.Get(url);
+		request.SetRequestHeader("Authorization", $"Bearer {SessionToken}");
         request.timeout = 5;
         yield return request.SendWebRequest();
         if (request.result != UnityWebRequest.Result.Success)
@@ -55,14 +56,16 @@ public sealed class UnityLeaderboardClient : MonoBehaviour
         onSuccess?.Invoke(JsonUtility.FromJson<LeaderboardResponse>(request.downloadHandler.text));
     }
 
-    public IEnumerator SubmitScore(string gameId, string leaderboardId, string playerName, long score, Action<ScoreResponse> onSuccess, Action<string> onError)
+    public IEnumerator SubmitScore(int slot, string playerName, long score, Action<ScoreResponse> onSuccess, Action<string> onError)
     {
-        string url = $"{LauncherApi}/v1/games/{UnityWebRequest.EscapeURL(gameId)}/leaderboards/{UnityWebRequest.EscapeURL(leaderboardId)}/scores";
+        if (slot < 0 || slot > 1) throw new ArgumentOutOfRangeException(nameof(slot));
+        string url = $"{LauncherApi}/v1/leaderboards/{slot}/scores";
         string json = JsonUtility.ToJson(new ScoreRequest { player_name = playerName, score = score });
         using var request = new UnityWebRequest(url, UnityWebRequest.kHttpVerbPOST);
         request.uploadHandler = new UploadHandlerRaw(System.Text.Encoding.UTF8.GetBytes(json));
         request.downloadHandler = new DownloadHandlerBuffer();
         request.SetRequestHeader("Content-Type", "application/json");
+		request.SetRequestHeader("Authorization", $"Bearer {SessionToken}");
         request.timeout = 5;
         yield return request.SendWebRequest();
         if (request.result != UnityWebRequest.Result.Success)
