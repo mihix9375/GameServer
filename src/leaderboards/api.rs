@@ -15,7 +15,7 @@ const SUBMIT_ROUTE: &str = "/v1/games/{game_id}/leaderboards/{board_id}/scores";
 struct SubmitScoreRequest
 {
 	player_name: String,
-	score: i64,
+	score: crate::score::Score,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +96,7 @@ pub async fn serve(store: LeaderboardStore, bind: &str) -> Result<(), String>
 	let address: SocketAddr = bind.parse()
 		.map_err(|error| format!("admin-config.jsonのleaderboard_bindが不正です: {error}"))?;
 	let app = Router::new()
+		.route("/v1/games/{game_id}/metadata", get(crate::catalog::metadata))
 		.route(LIST_ROUTE, get(list_leaderboards).put(sync_leaderboards))
 		.route(SUBMIT_ROUTE, post(submit_score))
 		.with_state(store);

@@ -19,6 +19,8 @@ use crate::init::Meta;
 const INDEX_HTML: &str = include_str!("../admin/index.html");
 const APP_CSS: &str = include_str!("../admin/app.css");
 const APP_JS: &str = include_str!("../admin/app.js");
+const VERSION_WARNING_JS: &str = include_str!("../admin/version-warning.mjs");
+const UPLOAD_FILES_JS: &str = include_str!("../admin/upload-files.mjs");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AdminConfig
@@ -119,7 +121,7 @@ struct GameUpdate
 #[derive(Deserialize)]
 struct LeaderboardUpdate
 {
-	leaderboards: Vec<crate::leaderboards::BoardDefinition>,
+	leaderboards: Vec<crate::leaderboards::SlotDefinition>,
 }
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ActionResponse>)>;
@@ -245,7 +247,7 @@ async fn update_leaderboards(
 {
 	authorize(&state, &headers)?;
 	let clean_id = existing_game_id(&state, &game_id)?;
-	state.leaderboards.configure(&clean_id, update.leaderboards).await
+	state.leaderboards.sync_slots(&clean_id, update.leaderboards).await
 		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
 	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}のランキング設定を保存しました") }))
 }
@@ -315,22 +317,13 @@ fn find_game_directory(root: &Path, game_id: &str) -> Result<PathBuf, (StatusCod
 
 fn find_distribution_zip(game_directory: &Path, game_id: &str) -> Result<PathBuf, (StatusCode, Json<ActionResponse>)>
 {
-	let expected = game_directory.join(format!("{game_id}.zip"));
-	if expected.is_file()
-	{
-		return Ok(expected);
-	}
-	let candidates: Vec<PathBuf> = std::fs::read_dir(game_directory)
-		.into_iter().flatten().flatten()
-		.map(|entry| entry.path())
-		.filter(|path| path.is_file() && path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("zip")))
-		.collect();
-	match candidates.as_slice()
-	{
-		[only] => Ok(only.clone()),
-		[] => Err(api_error(StatusCode::NOT_FOUND, "配布ZIPが見つかりません")),
-		_ => Err(api_error(StatusCode::CONFLICT, "配布ZIPを一意に決定できません")),
-	}
+	crate::distribution::find_archive(game_directory, game_id).map_err(|error| {
+		let status = match error {
+			crate::distribution::ArchiveError::Missing => StatusCode::NOT_FOUND,
+			crate::distribution::ArchiveError::Ambiguous => StatusCode::CONFLICT,
+		};
+		api_error(status, error.to_string())
+	})
 }
 
 async fn store_uploaded_archive(
@@ -419,6 +412,7 @@ fn validate_uploaded_archive(path: &Path, expected_game_id: Option<&str>) -> Res
 
 	if let Some((meta, meta_path)) = meta_and_path
 	{
+		crate::description::read_from_archive(&mut archive, &meta_path, &meta.description)?;
 		let title_image = meta.title_image.trim().replace('\\', "/");
 		if !title_image.is_empty()
 			&& !title_image.starts_with("data:")
@@ -544,11 +538,14 @@ async fn update_game(
 	meta.author = update.author.trim().to_string();
 	meta.version = update.version.trim().trim_start_matches(['v', 'V']).to_string();
 	meta.latest_update = crate::init::normalize_meta_date(&update.latest_update);
-	meta.description = update.description.trim().to_string();
+	meta.description = update.description;
+	meta.description_source = None;
 	meta.tags = update.tags.into_iter().map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect();
 	let json = serde_json::to_string_pretty(&meta)
 		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("meta.jsonを変換できません: {error}")))?;
 	let zip_path = find_distribution_zip(&game_directory, &clean_id)?;
+	crate::description::read_from_zip(&zip_path, &meta.description)
+		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
 	let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
 	let temp_zip = game_directory.join(format!(".meta-update-{stamp}.zip"));
 	let task_source = zip_path.clone();
@@ -677,7 +674,13 @@ pub async fn serve(
 		.route("/", get(index))
 		.route("/app.css", get(css))
 		.route("/app.js", get(js))
+		.route("/version-warning.mjs", get(|| async {
+			([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], VERSION_WARNING_JS)
+		}))
 		.route("/api/status", get(status))
+		.route("/upload-files.mjs", get(|| async {
+			([(header::CONTENT_TYPE, "text/javascript; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], UPLOAD_FILES_JS)
+		}))
 		.route("/api/clients", get(clients))
 		.route("/api/games", get(games))
 		.route("/api/games/upload", post(upload_game).layer(DefaultBodyLimit::disable()))

@@ -138,15 +138,25 @@ h2 { margin-bottom: 0; font-size: 17px; }
 .archive-dropzone strong { font-size: 18px; }
 .archive-dropzone span, .archive-dropzone small { color: var(--muted); }
 .archive-dropzone small { margin-top: 12px; font: 11px ui-monospace, monospace; overflow-wrap: anywhere; }
-.archive-note { margin: 16px 0 0; }
+.archive-dropzone #replacement-file-name { color: #fff; font-family: inherit; font-size: 18px; font-weight: 700; line-height: 1.5; }
+.upload-file-list { list-style: none; padding: 0; margin: 18px 0; display: grid; gap: 8px; }
+.upload-file-list li { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; overflow-wrap: anywhere; }
+.upload-file-list strong { color: #fff; font-size: 18px; line-height: 1.5; }
+.upload-file-list small { color: var(--muted); }
+.upload-file-list li[data-status="complete"] small { color: var(--green, #53d5a0); }
+.upload-file-list li[data-status="error"] small { color: var(--red); }
+.archive-dropzone[aria-disabled="true"] { cursor: wait; opacity: .6; }
 .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); color: var(--text); cursor: pointer; font-size: 20px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
 .form-grid label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .form-grid label.wide { grid-column: 1 / -1; }
 .form-grid input, .form-grid textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; outline: none; background: #090d13; color: var(--text); resize: vertical; }
+#edit-description { font: inherit; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .form-grid select { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; outline: none; background: #090d13; color: var(--text); }
 .form-grid input:focus, .form-grid textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #4c8dff18; }
 .form-note { margin: -8px 0 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.form-note.archive-note { margin: 16px 0 0; }
+.version-warning { margin: 18px 0 0; padding: 12px 15px; border: 1px solid #e9b44c55; border-radius: 9px; background: #e9b44c12; color: #f2ce85; font-size: 12px; line-height: 1.7; }
 .ranking-fields { display: grid; gap: 14px; }
 .ranking-field { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
 .ranking-field legend { padding: 0 7px; font-size: 12px; font-weight: 800; color: #9fc0ff; }

@@ -129,8 +129,18 @@ fn write_games_json(games_dir: &Path)
 							meta_path = dir_path.join("meta.json");
 						}
 						meta.id = game_id;
+						meta.description_source = None;
 						if meta.game.is_empty() { meta.game = format!("{}.exe", meta.id); }
 						let _ = fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default());
+						match crate::description::read_from_game(&dir_path, &meta.id, &meta.description)
+						{
+							Ok(Some(text)) => {
+								meta.description_source = Some(meta.description.clone());
+								meta.description = text;
+								},
+							Ok(None) => {},
+							Err(error) => tracing::warn!("Could not read description for {}: {}", meta.id, error),
+						}
 						all_metas.push(meta);
 					}
 				}
@@ -194,6 +204,7 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 					if let Some(Value::String(upd)) = meta.extra.remove("lastUpdate").or_else(|| meta.extra.remove("latest_update")) { meta.latest_update = upd; }
 				}
 				meta.latest_update = crate::init::normalize_meta_date(&meta.latest_update);
+				meta.description_source = None;
 				let game_dir = games.join(&meta.id);
 				let _ = fs::create_dir_all(&game_dir);
 				if let Ok(pretty_json) = serde_json::to_string_pretty(&meta)
@@ -248,7 +259,7 @@ mod tests
 		let archive_file = fs::File::create(temp.join("uploaded-file-name.zip")).unwrap();
 		let mut archive = zip::ZipWriter::new(archive_file);
 		archive.start_file("meta.json", SimpleFileOptions::default()).unwrap();
-		archive.write_all(br#"{"id":"123_configured_game","title":"Test","game":"Game.exe","version":"1.0.0"}"#).unwrap();
+		archive.write_all(br#"{"id":"123_configured_game","title":"Test","game":"Game.exe","version":"1.0.0","description":"\nOverview\n\nControls\r\nWASD: Move\n"}"#).unwrap();
 		archive.start_file("Game.exe", SimpleFileOptions::default()).unwrap();
 		archive.write_all(b"test executable").unwrap();
 		archive.finish().unwrap();
@@ -259,6 +270,40 @@ mod tests
 		assert!(!games.join("uploaded-file-name").exists());
 		let list: Vec<Meta> = serde_json::from_str(&fs::read_to_string(games.join("games.json")).unwrap()).unwrap();
 		assert_eq!(list[0].id, "123_configured_game");
+		assert_eq!(list[0].description, "\nOverview\n\nControls\r\nWASD: Move\n");
+		let saved_meta: Meta = serde_json::from_str(&fs::read_to_string(games.join("123_configured_game").join("meta.json")).unwrap()).unwrap();
+		assert_eq!(saved_meta.description, list[0].description);
 		let _ = fs::remove_dir_all(root);
+	}
+
+	#[test]
+	fn publishes_markdown_body_without_replacing_file_reference()
+	{
+		let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+		let root = std::env::temp_dir().join(format!("gameserver-description-{}-{unique}", std::process::id()));
+		let temp = root.join("temp");
+		let games = root.join("games");
+		fs::create_dir_all(&temp).unwrap();
+		fs::create_dir_all(&games).unwrap();
+		let archive_file = fs::File::create(temp.join("upload.zip")).unwrap();
+		let mut archive = zip::ZipWriter::new(archive_file);
+		archive.start_file("Wrapped/meta.json", SimpleFileOptions::default()).unwrap();
+		archive.write_all(br#"{"id":"markdown_game","game":"Game.exe","version":"1.0.0","description":"README.md"}"#).unwrap();
+		archive.start_file("Wrapped/Game.exe", SimpleFileOptions::default()).unwrap();
+		archive.write_all(b"test executable").unwrap();
+		archive.start_file("Wrapped/README.md", SimpleFileOptions::default()).unwrap();
+		archive.write_all("# 遊び方\n\n- WASD: 移動".as_bytes()).unwrap();
+		archive.finish().unwrap();
+
+		extract_games(root.clone(), games.clone());
+		let meta: Meta = serde_json::from_str(&fs::read_to_string(games.join("markdown_game/meta.json")).unwrap()).unwrap();
+		assert_eq!(meta.description, "README.md");
+		assert_eq!(meta.description_source, None);
+		let list: Vec<Meta> = serde_json::from_str(&fs::read_to_string(games.join("games.json")).unwrap()).unwrap();
+		assert_eq!(list[0].description, "# 遊び方\n\n- WASD: 移動");
+		assert_eq!(list[0].description_source.as_deref(), Some("README.md"));
+		let published_zip = games.join("markdown_game/markdown_game.zip");
+		assert_eq!(crate::description::read_from_zip(&published_zip, "README.md").unwrap().as_deref(), Some(list[0].description.as_str()));
+		fs::remove_dir_all(root).unwrap();
 	}
 }
