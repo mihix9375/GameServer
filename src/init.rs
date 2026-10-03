@@ -126,6 +126,9 @@ pub struct Meta
 	pub latest_update: String,
 	#[serde(default, deserialize_with = "any_to_string")]
 	pub description: String,
+	// Only populated in the published game list; meta.json retains the sibling filename.
+	#[serde(rename = "descriptionSource", default, skip_serializing_if = "Option::is_none")]
+	pub description_source: Option<String>,
 	
 	#[serde(flatten, skip_serializing)]
 	pub extra: Map<String, Value>,

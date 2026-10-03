@@ -97,27 +97,10 @@ async fn find_archive_and_version(game_id: &str) -> Result<(PathBuf, String), St
 		.map_err(|_| Status::not_found("meta.jsonが見つかりません"))?;
 	let meta: crate::init::Meta = serde_json::from_str(&meta_content)
 		.map_err(|error| Status::internal(format!("meta.jsonを解析できません: {error}")))?;
-	let expected_archive = game_directory.join(format!("{game_id}.zip"));
-	let archive = if expected_archive.is_file()
-	{
-		expected_archive
-	}
-	else
-	{
-		let candidates = std::fs::read_dir(&game_directory)
-			.map_err(|_| Status::not_found("配布ZIPが見つかりません"))?
-			.flatten()
-			.map(|entry| entry.path())
-			.filter(|path| path.extension().and_then(|value| value.to_str())
-				.is_some_and(|value| value.eq_ignore_ascii_case("zip")))
-			.collect::<Vec<_>>();
-		match candidates.as_slice()
-		{
-			[archive] => archive.clone(),
-			[] => return Err(Status::not_found("配布ZIPが見つかりません")),
-			_ => return Err(Status::failed_precondition("配布対象のZIPを一意に決定できません")),
-		}
-	};
+	let archive = crate::distribution::find_archive(&game_directory, game_id).map_err(|error| match error {
+		crate::distribution::ArchiveError::Missing => Status::not_found(error.to_string()),
+		crate::distribution::ArchiveError::Ambiguous => Status::failed_precondition(error.to_string()),
+	})?;
 	Ok((archive, meta.version))
 }
 

@@ -15,9 +15,13 @@ use gamelauncher::{
 
 mod net;
 mod init;
+mod description;
+mod catalog;
+mod distribution;
 mod src;
 mod admin;
 mod leaderboards;
+mod score;
 mod client_metrics;
 mod logging;
 

@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use crate::score::Score;
 
 mod api;
 
@@ -47,7 +48,7 @@ pub struct SlotDefinition
 pub struct ScoreEntry
 {
 	pub player_name: String,
-	pub score: i64,
+	pub score: Score,
 	pub submitted_at: i64,
 }
 
@@ -72,7 +73,7 @@ pub struct RankedEntry
 {
 	pub rank: usize,
 	pub player_name: String,
-	pub score: i64,
+	pub score: Score,
 	pub submitted_at: i64,
 }
 
@@ -144,45 +145,6 @@ impl LeaderboardStore
 			.collect()
 	}
 
-	pub async fn configure(
-		&self,
-		game_id: &str,
-		mut definitions: Vec<BoardDefinition>,
-	) -> Result<(), String>
-	{
-		validate_game_id(game_id)?;
-		if definitions.len() > MAX_BOARDS
-		{
-			return Err("ランキングは1ゲームにつき最大2つです".to_string());
-		}
-		for (index, definition) in definitions.iter_mut().enumerate()
-		{
-			if !definition.enabled
-			{
-				if definition.id.trim().is_empty() { definition.id = index.to_string(); }
-				if definition.name.trim().is_empty() { definition.name = format!("ランキング{}", index + 1); }
-			}
-		}
-		validate_definitions(&definitions)?;
-
-		let mut data = self.data.lock().await;
-		let mut previous_entries = data.games
-			.remove(game_id)
-			.unwrap_or_default()
-			.into_iter()
-			.map(|board| (board.definition.id, board.entries))
-			.collect::<HashMap<_, _>>();
-		let boards = definitions
-			.into_iter()
-			.map(|definition| build_board(definition, &mut previous_entries))
-			.collect::<Vec<_>>();
-		if !boards.is_empty()
-		{
-			data.games.insert(game_id.to_string(), boards);
-		}
-		self.persist(&data).await
-	}
-
 	/// ゲーム側の0/1スロットと同期する。既存の内部IDとスコアは位置ごとに維持する。
 	pub async fn sync_slots(
 		&self,
@@ -235,7 +197,7 @@ impl LeaderboardStore
 		game_id: &str,
 		board_id: &str,
 		player_name: &str,
-		score: i64,
+		score: impl Into<Score>,
 	) -> Result<usize, String>
 	{
 		validate_game_id(game_id)?;
@@ -259,7 +221,8 @@ impl LeaderboardStore
 		{
 			return Err("このランキングは無効です".to_string());
 		}
-		let rank = insertion_rank(board, score);
+		let score = score.into();
+		let rank = insertion_rank(board, &score);
 		board.entries.push(ScoreEntry {
 			player_name: player_name.to_string(),
 			score,
@@ -290,19 +253,6 @@ impl LeaderboardStore
 	}
 }
 
-fn build_board(
-	mut definition: BoardDefinition,
-	previous_entries: &mut HashMap<String, Vec<ScoreEntry>>,
-) -> Leaderboard
-{
-	definition.id = definition.id.trim().to_string();
-	definition.name = definition.name.trim().to_string();
-	let entries = previous_entries.remove(&definition.id).unwrap_or_default();
-	let mut board = Leaderboard { definition, entries };
-	sort_entries(&mut board);
-	board
-}
-
 fn public_board(board: &Leaderboard) -> PublicBoard
 {
 	PublicBoard {
@@ -317,7 +267,7 @@ fn public_board(board: &Leaderboard) -> PublicBoard
 			.map(|(index, entry)| RankedEntry {
 				rank: index + 1,
 				player_name: entry.player_name.clone(),
-				score: entry.score,
+				score: entry.score.clone(),
 				submitted_at: entry.submitted_at,
 			})
 			.collect(),
@@ -337,11 +287,11 @@ fn sort_entries(board: &mut Leaderboard)
 	}
 }
 
-fn insertion_rank(board: &Leaderboard, score: i64) -> usize
+fn insertion_rank(board: &Leaderboard, score: &Score) -> usize
 {
 	let higher_ranked_entries = board.entries.iter().filter(|entry| match board.definition.order {
-		RankingOrder::HighScore => entry.score >= score,
-		RankingOrder::LowScore => entry.score <= score,
+		RankingOrder::HighScore => &entry.score >= score,
+		RankingOrder::LowScore => &entry.score <= score,
 	});
 	1 + higher_ranked_entries.count()
 }
@@ -423,28 +373,44 @@ mod tests
 	async fn high_and_low_rankings_sort_in_opposite_directions()
 	{
 		let store = store("sort").await;
-		store.configure("game", vec![
-			BoardDefinition { id: "score".into(), name: "Score".into(), order: RankingOrder::HighScore, enabled: true },
-			BoardDefinition { id: "time".into(), name: "Time".into(), order: RankingOrder::LowScore, enabled: true },
+		store.sync_slots("game", vec![
+			SlotDefinition { name: "Score".into(), order: RankingOrder::HighScore, enabled: true },
+			SlotDefinition { name: "Time".into(), order: RankingOrder::LowScore, enabled: true },
 		]).await.unwrap();
-		assert_eq!(store.submit("game", "score", "A", 10).await.unwrap(), 1);
-		assert_eq!(store.submit("game", "score", "B", 20).await.unwrap(), 1);
-		assert_eq!(store.submit("game", "time", "A", 1000).await.unwrap(), 1);
-		assert_eq!(store.submit("game", "time", "B", 900).await.unwrap(), 1);
+		assert_eq!(store.submit("game", "0", "A", 10).await.unwrap(), 1);
+		assert_eq!(store.submit("game", "0", "B", 20).await.unwrap(), 1);
+		assert_eq!(store.submit("game", "1", "A", 1000).await.unwrap(), 1);
+		assert_eq!(store.submit("game", "1", "B", 900).await.unwrap(), 1);
 		let boards = store.get("game").await.leaderboards;
-		assert_eq!(boards[0].entries.iter().map(|entry| entry.score).collect::<Vec<_>>(), [20, 10]);
-		assert_eq!(boards[1].entries.iter().map(|entry| entry.score).collect::<Vec<_>>(), [900, 1000]);
+		assert_eq!(boards[0].entries.iter().map(|entry| entry.score.clone()).collect::<Vec<_>>(), [20.into(), 10.into()]);
+		assert_eq!(boards[1].entries.iter().map(|entry| entry.score.clone()).collect::<Vec<_>>(), [900.into(), 1000.into()]);
 		let _ = tokio::fs::remove_dir_all(test_root("sort")).await;
+	}
+
+	#[tokio::test]
+	async fn large_decimal_scores_survive_sorting_and_reload() {
+		let store = store("large-score").await;
+		store.sync_slots("game", vec![SlotDefinition { name: "Score".into(), order: RankingOrder::HighScore, enabled: true }]).await.unwrap();
+		let a = Score::parse("100000000000000000000000000001").unwrap();
+		let b = Score::parse("100000000000000000000000000002").unwrap();
+		store.submit("game", "0", "A", a.clone()).await.unwrap();
+		assert_eq!(store.submit("game", "0", "B", b.clone()).await.unwrap(), 1);
+		store.submit("game", "0", "Tiny", Score::parse("1e-1000").unwrap()).await.unwrap();
+		let reloaded = LeaderboardStore::load(&test_root("large-score")).await.unwrap();
+		let board = &reloaded.get("game").await.leaderboards[0];
+		assert_eq!(board.entries[0].score, b); assert_eq!(board.entries[1].score, a);
+		assert_eq!(board.entries[2].score, Score::parse("1e-1000").unwrap());
+		let _ = tokio::fs::remove_dir_all(test_root("large-score")).await;
 	}
 
 	#[tokio::test]
 	async fn rejects_more_than_two_boards()
 	{
 		let store = store("limit").await;
-		let boards = (0..3).map(|index| BoardDefinition {
-			id: format!("board{index}"), name: format!("Board {index}"), order: RankingOrder::HighScore, enabled: true,
+		let boards = (0..3).map(|index| SlotDefinition {
+			name: format!("Board {index}"), order: RankingOrder::HighScore, enabled: true,
 		}).collect();
-		assert!(store.configure("game", boards).await.is_err());
+		assert!(store.sync_slots("game", boards).await.is_err());
 		let _ = tokio::fs::remove_dir_all(test_root("limit")).await;
 	}
 
@@ -452,16 +418,17 @@ mod tests
 	async fn slot_sync_preserves_existing_ids_and_scores_by_position()
 	{
 		let store = store("create").await;
-		store.configure("game", vec![BoardDefinition {
-			id: "old_score".into(), name: "Old".into(), order: RankingOrder::HighScore, enabled: true,
-		}]).await.unwrap();
-		store.submit("game", "old_score", "A", 10).await.unwrap();
+		// Seed a legacy record directly; no obsolete configuration implementation is needed.
+		store.data.lock().await.games.insert("game".into(), vec![Leaderboard {
+			definition: BoardDefinition { id: "old_score".into(), name: "Old".into(), order: RankingOrder::HighScore, enabled: true },
+			entries: vec![ScoreEntry { player_name: "A".into(), score: 10.into(), submitted_at: 1 }],
+		}]);
 		let result = store.sync_slots("game", vec![
 			SlotDefinition { name: "Score".into(), order: RankingOrder::HighScore, enabled: true },
 			SlotDefinition { name: "Time".into(), order: RankingOrder::LowScore, enabled: true },
 		]).await.unwrap();
 		assert_eq!(result.leaderboards[0].id, "old_score");
-		assert_eq!(result.leaderboards[0].entries[0].score, 10);
+		assert_eq!(result.leaderboards[0].entries[0].score, 10.into());
 		assert_eq!(result.leaderboards[1].id, "1");
 		assert_eq!(store.definitions("game").await.len(), 2);
 		let disabled = store.sync_slots("game", vec![
@@ -469,13 +436,8 @@ mod tests
 			SlotDefinition { name: "Time".into(), order: RankingOrder::LowScore, enabled: true },
 		]).await.unwrap();
 		assert!(!disabled.leaderboards[0].enabled);
-		assert_eq!(disabled.leaderboards[0].entries[0].score, 10);
+		assert_eq!(disabled.leaderboards[0].entries[0].score, 10.into());
 		assert!(store.submit("game", "old_score", "B", 20).await.is_err());
-		assert!(store.sync_slots("game", vec![
-			SlotDefinition { name: "A".into(), order: RankingOrder::HighScore, enabled: true },
-			SlotDefinition { name: "B".into(), order: RankingOrder::HighScore, enabled: true },
-			SlotDefinition { name: "C".into(), order: RankingOrder::HighScore, enabled: true },
-		]).await.is_err());
 		let _ = tokio::fs::remove_dir_all(test_root("create")).await;
 	}
 }

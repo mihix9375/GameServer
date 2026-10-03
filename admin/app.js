@@ -1,3 +1,6 @@
+import { hasUnversionedChanges } from "./version-warning.mjs";
+import { bindFileDropzone, uploadFileBatch } from "./upload-files.mjs";
+
 const state = {
   games: [],
   comments: [],
@@ -250,7 +253,26 @@ function fillGameDetails(game) {
   $("#edit-author").value = game.author || "";
   $("#edit-date").value = game.latestUpdate || game.latest_update || "";
   $("#edit-tags").value = Array.isArray(game.tags) ? game.tags.join(", ") : "";
-  $("#edit-description").value = game.description || "";
+  $("#edit-description").value = game.descriptionSource || game.description || "";
+  originalGameDetails = readGameDetails();
+  updateVersionWarning();
+}
+
+let originalGameDetails = null;
+
+function readGameDetails() {
+  return {
+    title: $("#edit-title").value,
+    version: $("#edit-version").value,
+    author: $("#edit-author").value,
+    latest_update: $("#edit-date").value,
+    tags: $("#edit-tags").value.split(",").map(tag => tag.trim()).filter(Boolean),
+    description: $("#edit-description").value,
+  };
+}
+
+function updateVersionWarning() {
+  $("#version-warning").hidden = !hasUnversionedChanges(originalGameDetails, readGameDetails());
 }
 
 function selectedEditorGame() {
@@ -295,15 +317,13 @@ function rankingField(index, board = {}) {
     <legend>ランキング ${index + 1}</legend>
     <label class="ranking-enabled"><input type="checkbox" data-role="enabled"> 使用する</label>
     <div class="form-grid">
-      <label><span>ID（半角英数字・_・-）</span><input data-role="id" maxlength="32" placeholder="score"></label>
-      <label><span>表示名</span><input data-role="name" maxlength="40" placeholder="ハイスコア"></label>
-      <label class="wide"><span>並び順</span><select data-role="order"><option value="high_score">高得点順（大きい方が上）</option><option value="low_score">低タイム順（小さい方が上）</option></select></label>
+      <label class="wide"><span>表示名</span><input data-role="name" maxlength="40" placeholder="ハイスコア"></label>
+      <label class="wide"><span>並び順</span><select data-role="order"><option value="high_score">高得点順</option><option value="low_score">低タイム順</option></select></label>
     </div>`;
   const enabled = field.querySelector('[data-role="enabled"]');
-  const controls = [...field.querySelectorAll('[data-role="id"], [data-role="name"], [data-role="order"]')];
+  const controls = [...field.querySelectorAll('[data-role="name"], [data-role="order"]')];
   enabled.checked = board.enabled ?? Boolean(board.id);
-  field.querySelector('[data-role="id"]').value = board.id || "";
-  field.querySelector('[data-role="name"]').value = board.name || "";
+  field.querySelector('[data-role="name"]').value = board.name || `ランキング${index + 1}`;
   field.querySelector('[data-role="order"]').value = board.order || "high_score";
 
   const syncEnabledState = () => {
@@ -338,7 +358,6 @@ async function loadEditorRankings() {
 
 function readRankingField(field) {
   return {
-    id: field.querySelector('[data-role="id"]').value.trim(),
     name: field.querySelector('[data-role="name"]').value.trim(),
     order: field.querySelector('[data-role="order"]').value,
     enabled: field.querySelector('[data-role="enabled"]').checked,
@@ -372,14 +391,7 @@ async function saveGame(event) {
   event.preventDefault();
   const id = $("#edit-id").value;
   const button = $("#save-edit");
-  const payload = {
-    title: $("#edit-title").value,
-    version: $("#edit-version").value,
-    author: $("#edit-author").value,
-    latest_update: $("#edit-date").value,
-    tags: $("#edit-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
-    description: $("#edit-description").value,
-  };
+  const payload = readGameDetails();
   button.disabled = true;
   try {
     const result = await api(`/api/games/${encodeURIComponent(id)}`, {
@@ -407,17 +419,72 @@ async function deleteGame(game, button) {
   } catch (error) { toast(error.message, true); log(`ゲーム削除失敗: ${error.message}`); button.disabled = false; }
 }
 
-async function uploadGame(file, button) {
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".zip")) { toast("ZIPファイルを選択してください", true); return; }
-  const form = new FormData(); form.append("game", file, file.name);
-  button.disabled = true; button.textContent = "アップロード中...";
-  log(`${file.name} のアップロードを開始しました`);
+let uploadFiles = [];
+let uploadBusy = false;
+
+function selectUploadFiles(files) {
+  if (uploadBusy || !files.length) return;
+  const invalid = files.filter(file => !file.name.toLowerCase().endsWith(".zip"));
+  uploadFiles = files.filter(file => file.name.toLowerCase().endsWith(".zip"));
+  if (invalid.length) toast(`ZIP以外の${invalid.length}件は選択されませんでした`, true);
+  $("#upload-file-list").replaceChildren(...uploadFiles.map(file => {
+    const row = document.createElement("li");
+    const name = document.createElement("strong"); name.textContent = file.name;
+    const status = document.createElement("small"); status.textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · 待機中`;
+    row.append(name, status);
+    return row;
+  }));
+  $("#upload-summary").textContent = uploadFiles.length ? `${uploadFiles.length}件のZIPを選択しました` : "ZIPファイルを選択してください";
+  $("#start-upload").disabled = !uploadFiles.length;
+  $("#start-upload").textContent = "アップロードする";
+}
+
+async function uploadGames() {
+  if (uploadBusy || !uploadFiles.length) return;
+  uploadBusy = true;
+  const button = $("#start-upload");
+  button.disabled = true;
+  $("#close-upload").disabled = true;
+  $("#game-upload-input").disabled = true;
+  $("#upload-dropzone").setAttribute("aria-disabled", "true");
+  const files = [...uploadFiles];
   try {
-    const result = await api("/api/games/upload", { method: "POST", body: form });
-    toast(result.message); log(`${file.name}: ${result.message}`); await loadAll();
-  } catch (error) { toast(error.message, true); log(`アップロード失敗: ${error.message}`); }
-  finally { button.disabled = false; button.textContent = "ZIPをアップロード"; $("#game-upload-input").value = ""; }
+    const results = await uploadFileBatch(files, async file => {
+      const form = new FormData(); form.append("game", file, file.name);
+      log(`${file.name} のアップロードを開始しました`);
+      return api("/api/games/upload", { method: "POST", body: form });
+    }, (index, status, message) => {
+      const row = $("#upload-file-list").children[index];
+      row.dataset.status = status;
+      row.querySelector("small").textContent = status === "uploading" ? "アップロード中..." : message;
+      button.textContent = `アップロード中 ${index + 1} / ${files.length}`;
+      $("#upload-summary").textContent = `${index + 1} / ${files.length}件を処理中`;
+      if (status !== "uploading") log(`${files[index].name}: ${status === "error" ? "失敗: " : ""}${message}`);
+    });
+    const success = results.filter(result => result.ok).length;
+    const summary = `完了: ${success}件成功・${results.length - success}件失敗`;
+    $("#upload-summary").textContent = summary;
+    toast(summary, success !== results.length);
+    // 成功したZIPは再送せず、失敗分だけを再試行できるよう残す。
+    uploadFiles = files.filter((_, index) => !results[index].ok);
+    if (success) {
+      try { await loadAll(); }
+      catch (error) { toast(`登録済みですが一覧の再読込に失敗しました: ${error.message}`, true); }
+    }
+  } finally {
+    uploadBusy = false;
+    button.disabled = !uploadFiles.length;
+    button.textContent = uploadFiles.length ? "失敗したZIPを再試行" : "アップロードする";
+    $("#close-upload").disabled = false;
+    $("#game-upload-input").disabled = false;
+    $("#upload-dropzone").removeAttribute("aria-disabled");
+  }
+}
+
+function closeUpload() {
+  if (uploadBusy) return;
+  $("#upload-modal").classList.add("hidden");
+  $("#upload-game").focus();
 }
 
 function selectReplacementFile(file) {
@@ -483,27 +550,31 @@ $$('.nav-item').forEach((button) => button.addEventListener("click", () => {
 }));
 $("#refresh-all").addEventListener("click", loadAll);
 $("#rescan").addEventListener("click", (event) => rescan(event.currentTarget));
-$("#upload-game").addEventListener("click", () => $("#game-upload-input").click());
-$("#game-upload-input").addEventListener("change", (event) => uploadGame(event.target.files?.[0], $("#upload-game")));
+$("#upload-game").addEventListener("click", () => {
+  $("#upload-modal").classList.remove("hidden");
+  $("#upload-dropzone").focus();
+});
+$("#close-upload").addEventListener("click", closeUpload);
+$("#upload-modal").addEventListener("click", event => { if (event.target === $("#upload-modal")) closeUpload(); });
+$("#upload-modal").addEventListener("keydown", event => { if (event.key === "Escape") closeUpload(); });
+$("#start-upload").addEventListener("click", () => {
+  // 再試行時にも行とファイルを一対一に揃える。
+  selectUploadFiles(uploadFiles);
+  void uploadGames();
+});
+bindFileDropzone($("#upload-dropzone"), $("#game-upload-input"), selectUploadFiles, () => uploadBusy);
 $("#game-search").addEventListener("input", renderGames);
 $("#edit-form").addEventListener("submit", saveGame);
+$("#edit-form").addEventListener("input", updateVersionWarning);
 $("#ranking-form").addEventListener("submit", saveRankings);
 $("#close-game-editor").addEventListener("click", closeGameManager);
 $("#game-modal").addEventListener("click", (event) => { if (event.target === $("#game-modal")) closeGameManager(); });
 $$('.editor-tab').forEach((button) => button.addEventListener("click", () => setEditorTab(button.dataset.editorTab)));
 $("#game-comment-search").addEventListener("input", renderGameComments);
-$("#archive-dropzone").addEventListener("click", () => $("#replacement-upload-input").click());
-$("#archive-dropzone").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); $("#replacement-upload-input").click(); }
+bindFileDropzone($("#archive-dropzone"), $("#replacement-upload-input"), files => {
+  if (files.length > 1) { toast("このゲームの更新用ZIPは1件だけ選択してください", true); return; }
+  selectReplacementFile(files[0]);
 });
-$("#replacement-upload-input").addEventListener("change", (event) => selectReplacementFile(event.target.files?.[0]));
-for (const eventName of ["dragenter", "dragover"]) {
-  $("#archive-dropzone").addEventListener(eventName, (event) => { event.preventDefault(); $("#archive-dropzone").classList.add("dragging"); });
-}
-for (const eventName of ["dragleave", "drop"]) {
-  $("#archive-dropzone").addEventListener(eventName, (event) => { event.preventDefault(); $("#archive-dropzone").classList.remove("dragging"); });
-}
-$("#archive-dropzone").addEventListener("drop", (event) => selectReplacementFile(event.dataTransfer?.files?.[0]));
 $("#replace-game-upload").addEventListener("click", (event) => replaceGameArchive(event.currentTarget));
 $("#login-form").addEventListener("submit", async (event) => {
   event.preventDefault(); state.token = $("#token").value; sessionStorage.setItem("admin-token", state.token);
