@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bindFileDropzone, uploadFileBatch } from "../upload-files.mjs";
+import { bindFileDropzone, uploadFileBatch, createUploadFileRow } from "../upload-files.mjs";
 
 test("uploads every ZIP in order, keeps going after failure, and reports individual results", async () => {
   const files = [{ name: "one.zip" }, { name: "bad.zip" }, { name: "three.zip" }];
@@ -27,6 +27,31 @@ function surface() {
   target.contains = value => value === target;
   return target;
 }
+
+test("individual removal identifies the selected File, not a potentially duplicate name", () => {
+  const document = { createElement() {
+    const element = new EventTarget();
+    element.children = []; element.attributes = {};
+    element.append = (...children) => element.children.push(...children);
+    element.setAttribute = (name, value) => { element.attributes[name] = value; };
+    return element;
+  } };
+  const first = { name: "same.zip", size: 1024 }, second = { name: "same.zip", size: 2048 };
+  let selected = [first, second], busy = false;
+  const row = createUploadFileRow(document, second, file => { selected = selected.filter(value => value !== file); }, () => busy);
+  const button = row.children[0].children[1];
+  assert.equal(button.type, "button");
+  assert.equal(button.attributes["aria-label"], "same.zipを選択から外す");
+  busy = true;
+  button.dispatchEvent(new Event("click"));
+  assert.deepEqual(selected, [first, second]);
+  busy = false; button.disabled = true;
+  button.dispatchEvent(new Event("click"));
+  assert.deepEqual(selected, [first, second]);
+  button.disabled = false;
+  button.dispatchEvent(new Event("click"));
+  assert.deepEqual(selected, [first]);
+});
 
 test("drop and file picker both deliver all files; busy state prevents selection", () => {
   const zone = surface(), input = surface();

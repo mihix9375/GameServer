@@ -64,7 +64,6 @@ pub struct Leaderboard
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct LeaderboardData
 {
-	#[serde(default)]
 	games: HashMap<String, Vec<Leaderboard>>,
 }
 
@@ -101,18 +100,44 @@ pub struct LeaderboardStore
 	data: Arc<Mutex<LeaderboardData>>,
 }
 
+#[derive(Debug)]
+pub enum LeaderboardError { Invalid(String), Storage(String) }
+impl From<String> for LeaderboardError {
+	fn from(message: String) -> Self { Self::Invalid(message) }
+}
+impl std::fmt::Display for LeaderboardError {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self { Self::Invalid(message) | Self::Storage(message) => formatter.write_str(message) }
+	}
+}
+
 impl LeaderboardStore
 {
 	pub async fn load(root: &Path) -> Result<Self, String>
 	{
 		let path = root.join("leaderboards.json");
-		let data = match tokio::fs::read_to_string(&path).await
+		let mut data: LeaderboardData = match tokio::fs::read_to_string(&path).await
 		{
 			Ok(content) => serde_json::from_str(&content)
 				.map_err(|error| format!("leaderboards.jsonが不正です: {error}"))?,
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => LeaderboardData::default(),
 			Err(error) => return Err(format!("leaderboards.jsonを読めません: {error}")),
 		};
+		for (game_id, boards) in &mut data.games {
+			validate_game_id(game_id)?;
+			if boards.len() > MAX_BOARDS { return Err("保存済みランキングが最大2つを超えています".into()); }
+			validate_definitions(&boards.iter().map(|board| board.definition.clone()).collect::<Vec<_>>())?;
+			for board in boards {
+				if board.entries.len() > MAX_STORED_ENTRIES { return Err("保存済みスコアが最大100件を超えています".into()); }
+				for entry in &board.entries {
+					if entry.player_name.trim().is_empty() || entry.player_name.chars().count() > MAX_PLAYER_NAME_LENGTH
+						|| entry.player_name.chars().any(char::is_control) || entry.submitted_at < 0 {
+						return Err("保存済みスコアの名前または日時が不正です".into());
+					}
+				}
+				sort_entries(board);
+			}
+		}
 		Ok(Self {
 			path,
 			data: Arc::new(Mutex::new(data)),
@@ -150,16 +175,17 @@ impl LeaderboardStore
 		&self,
 		game_id: &str,
 		definitions: Vec<SlotDefinition>,
-	) -> Result<GameLeaderboards, String>
+	) -> Result<GameLeaderboards, LeaderboardError>
 	{
 		validate_game_id(game_id)?;
 		if definitions.len() > MAX_BOARDS
 		{
-			return Err("ランキングは1ゲームにつき最大2つです".to_string());
+			return Err("ランキングは1ゲームにつき最大2つです".to_string().into());
 		}
 
-		let mut data = self.data.lock().await;
-		let previous = data.games.remove(game_id).unwrap_or_default();
+		let data = self.data.clone().lock_owned().await;
+		let mut next = data.clone();
+		let previous = next.games.remove(game_id).unwrap_or_default();
 		let mut boards = Vec::with_capacity(definitions.len());
 		for (index, slot) in definitions.into_iter().enumerate()
 		{
@@ -179,16 +205,17 @@ impl LeaderboardStore
 			sort_entries(&mut board);
 			boards.push(board);
 		}
+		validate_definitions(&boards.iter().map(|board| board.definition.clone()).collect::<Vec<_>>())?;
 
 		if !boards.is_empty()
 		{
-			data.games.insert(game_id.to_string(), boards.clone());
+			next.games.insert(game_id.to_string(), boards.clone());
 		}
 		let response = GameLeaderboards {
 			game_id: game_id.to_string(),
 			leaderboards: boards.iter().map(public_board).collect(),
 		};
-		self.persist(&data).await?;
+		self.commit(data, next).await?;
 		Ok(response)
 	}
 
@@ -198,28 +225,29 @@ impl LeaderboardStore
 		board_id: &str,
 		player_name: &str,
 		score: impl Into<Score>,
-	) -> Result<usize, String>
+	) -> Result<usize, LeaderboardError>
 	{
 		validate_game_id(game_id)?;
 		validate_board_id(board_id)?;
 		let player_name = player_name.trim();
 		if player_name.is_empty() || player_name.chars().count() > MAX_PLAYER_NAME_LENGTH
 		{
-			return Err("プレイヤー名は1〜24文字で指定してください".to_string());
+			return Err("プレイヤー名は1〜24文字で指定してください".to_string().into());
 		}
 		if player_name.chars().any(char::is_control)
 		{
-			return Err("プレイヤー名に制御文字は使えません".to_string());
+			return Err("プレイヤー名に制御文字は使えません".to_string().into());
 		}
 
-		let mut data = self.data.lock().await;
-		let board = data.games
+		let data = self.data.clone().lock_owned().await;
+		let mut next = data.clone();
+		let board = next.games
 			.get_mut(game_id)
 			.and_then(|boards| boards.iter_mut().find(|board| board.definition.id == board_id))
 			.ok_or_else(|| "ランキングが見つかりません".to_string())?;
 		if !board.definition.enabled
 		{
-			return Err("このランキングは無効です".to_string());
+			return Err("このランキングは無効です".to_string().into());
 		}
 		let score = score.into();
 		let rank = insertion_rank(board, &score);
@@ -230,27 +258,38 @@ impl LeaderboardStore
 		});
 		sort_entries(board);
 		board.entries.truncate(MAX_STORED_ENTRIES);
-		self.persist(&data).await?;
+		self.commit(data, next).await?;
 		Ok(rank)
 	}
 
-	pub async fn remove_game(&self, game_id: &str) -> Result<(), String>
+	pub async fn remove_game(&self, game_id: &str) -> Result<(), LeaderboardError>
 	{
-		let mut data = self.data.lock().await;
-		if data.games.remove(game_id).is_some()
+		let data = self.data.clone().lock_owned().await;
+		let mut next = data.clone();
+		if next.games.remove(game_id).is_some()
 		{
-			self.persist(&data).await?;
+			self.commit(data, next).await?;
 		}
 		Ok(())
 	}
 
-	async fn persist(&self, data: &LeaderboardData) -> Result<(), String>
+	/// 保存成功後だけメモリを入れ替える。呼び出し側がキャンセルされても、
+	/// ワーカーはロックを保持したままファイルとメモリの更新を完了する。
+	async fn commit(&self, mut data: tokio::sync::OwnedMutexGuard<LeaderboardData>, next: LeaderboardData) -> Result<(), LeaderboardError>
 	{
-		let json = serde_json::to_string_pretty(data)
-			.map_err(|error| format!("ランキングを保存できません: {error}"))?;
-		tokio::fs::write(&self.path, json).await
-			.map_err(|error| format!("ランキングを保存できません: {error}"))
+		let path = self.path.clone();
+		tokio::task::spawn_blocking(move || {
+			persist_atomic(&path, &next).map_err(LeaderboardError::Storage)?;
+			*data = next;
+			Ok(())
+		}).await.map_err(|error| LeaderboardError::Storage(format!("ランキング保存処理に失敗しました: {error}")))?
 	}
+}
+
+fn persist_atomic(path: &Path, data: &LeaderboardData) -> Result<(), String>
+{
+	let json = serde_json::to_vec_pretty(data).map_err(|error| format!("ランキングを保存できません: {error}"))?;
+	crate::storage::write_atomic(path, &json).map_err(|error| format!("ランキングを保存できません: {error}"))
 }
 
 fn public_board(board: &Leaderboard) -> PublicBoard
@@ -279,10 +318,10 @@ fn sort_entries(board: &mut Leaderboard)
 	match board.definition.order
 	{
 		RankingOrder::HighScore => board.entries.sort_by(|a, b| {
-			b.score.cmp(&a.score).then(a.submitted_at.cmp(&b.submitted_at))
+			b.score.cmp(&a.score)
 		}),
 		RankingOrder::LowScore => board.entries.sort_by(|a, b| {
-			a.score.cmp(&b.score).then(a.submitted_at.cmp(&b.submitted_at))
+			a.score.cmp(&b.score)
 		}),
 	}
 }
@@ -308,6 +347,9 @@ fn validate_definitions(definitions: &[BoardDefinition]) -> Result<(), String>
 		if name.is_empty() || name.chars().count() > MAX_BOARD_NAME_LENGTH
 		{
 			return Err("ランキング名は1〜40文字で指定してください".to_string());
+		}
+		if name.chars().any(char::is_control) {
+			return Err("ランキング名に制御文字は使えません".to_string());
 		}
 		if !ids.insert(id)
 		{
@@ -367,6 +409,113 @@ mod tests
 		let _ = tokio::fs::remove_dir_all(&root).await;
 		tokio::fs::create_dir_all(&root).await.unwrap();
 		LeaderboardStore::load(&root).await.unwrap()
+	}
+
+	#[tokio::test]
+	async fn incomplete_or_invalid_saved_data_is_rejected_without_overwriting() {
+		let root = test_root("invalid-saved");
+		tokio::fs::create_dir_all(&root).await.unwrap();
+		let path = root.join("leaderboards.json");
+		for json in [r#"{}"#, r#"{"games":{"game":[{"id":"0","name":"","order":"high_score"}]}}"#, r#"{"games":{"game":[{"id":"0","name":"Score","order":"high_score","entries":[{"player_name":"","score":"1","submitted_at":0}]}]}}"#] {
+			tokio::fs::write(&path, json).await.unwrap();
+			assert!(LeaderboardStore::load(&root).await.is_err());
+			assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), json);
+		}
+		tokio::fs::remove_dir_all(root).await.unwrap();
+	}
+
+	#[test]
+	fn tied_scores_preserve_arrival_order_even_if_clock_moves_backwards() {
+		for order in [RankingOrder::HighScore, RankingOrder::LowScore] {
+			let mut board = Leaderboard { definition: BoardDefinition { id: "0".into(), name: "Score".into(), order, enabled: true }, entries: vec![
+				ScoreEntry { player_name: "Earlier".into(), score: 10.into(), submitted_at: 100 },
+				ScoreEntry { player_name: "Later".into(), score: 10.into(), submitted_at: 1 },
+			] };
+			sort_entries(&mut board);
+			assert_eq!(board.entries[0].player_name, "Earlier");
+			assert_eq!(insertion_rank(&board, &10.into()), 3);
+		}
+	}
+
+	#[tokio::test]
+	async fn rejected_settings_preserve_memory_disk_and_other_games() {
+		let store = store("rejected-settings").await;
+		let slot = |name: String| SlotDefinition { name, order: RankingOrder::HighScore, enabled: true };
+		store.sync_slots("game", vec![slot("Original".into()), slot("Time".into())]).await.unwrap();
+		store.submit("game", "0", "A", 42).await.unwrap();
+		let before = serde_json::to_value(store.get("game").await).unwrap();
+		let disk = tokio::fs::read(&store.path).await.unwrap();
+		for bad in ["".to_string(), "X".repeat(41), "Bad\nTitle".to_string()] {
+			assert!(matches!(store.sync_slots("game", vec![slot("Changed".into()), slot(bad)]).await, Err(LeaderboardError::Invalid(_))));
+			assert_eq!(serde_json::to_value(store.get("game").await).unwrap(), before);
+			assert_eq!(tokio::fs::read(&store.path).await.unwrap(), disk);
+		}
+		store.sync_slots("other", vec![slot("Other".into())]).await.unwrap();
+		let reloaded = LeaderboardStore::load(&test_root("rejected-settings")).await.unwrap();
+		assert_eq!(serde_json::to_value(reloaded.get("game").await).unwrap(), before);
+		tokio::fs::remove_dir_all(test_root("rejected-settings")).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn failed_saves_do_not_change_memory_and_retry_does_not_duplicate() {
+		let store = store("failed-save").await;
+		let slots = || vec![SlotDefinition { name: "Original".into(), order: RankingOrder::HighScore, enabled: true }];
+		store.sync_slots("game", slots()).await.unwrap();
+		store.submit("game", "0", "A", 10).await.unwrap();
+		let before = serde_json::to_value(store.get("game").await).unwrap();
+		let backup = store.path.with_extension("backup");
+		tokio::fs::rename(&store.path, &backup).await.unwrap();
+		// 保存先をディレクトリにして、置換失敗をOSに起こさせる。
+		tokio::fs::create_dir(&store.path).await.unwrap();
+		assert!(matches!(store.submit("game", "0", "B", 20).await, Err(LeaderboardError::Storage(_))));
+		assert!(matches!(store.sync_slots("game", vec![]).await, Err(LeaderboardError::Storage(_))));
+		assert!(matches!(store.remove_game("game").await, Err(LeaderboardError::Storage(_))));
+		assert_eq!(serde_json::to_value(store.get("game").await).unwrap(), before);
+		let files = std::fs::read_dir(test_root("failed-save")).unwrap().count();
+		assert_eq!(files, 2, "失敗した一時ファイルを残さない");
+		tokio::fs::remove_dir(&store.path).await.unwrap();
+		tokio::fs::rename(&backup, &store.path).await.unwrap();
+		assert_eq!(serde_json::to_value(LeaderboardStore::load(&test_root("failed-save")).await.unwrap().get("game").await).unwrap(), before);
+		store.submit("game", "0", "B", 20).await.unwrap();
+		let reloaded = LeaderboardStore::load(&test_root("failed-save")).await.unwrap();
+		assert_eq!(reloaded.get("game").await.leaderboards[0].entries.len(), 2);
+		tokio::fs::remove_dir_all(test_root("failed-save")).await.unwrap();
+	}
+
+	#[tokio::test]
+	#[cfg(windows)]
+	async fn locked_destination_preserves_the_original_file() {
+		use std::os::windows::fs::OpenOptionsExt;
+		let store = store("locked-file").await;
+		store.sync_slots("game", vec![SlotDefinition { name: "Score".into(), order: RankingOrder::HighScore, enabled: true }]).await.unwrap();
+		store.submit("game", "0", "A", 10).await.unwrap();
+		let before = tokio::fs::read(&store.path).await.unwrap();
+		// Windowsで保存先を共有不可にし、既存ファイルの置換だけを失敗させる。
+		let locked = std::fs::OpenOptions::new().read(true).share_mode(0).open(&store.path).unwrap();
+		assert!(matches!(store.submit("game", "0", "B", 20).await, Err(LeaderboardError::Storage(_))));
+		drop(locked);
+		assert_eq!(tokio::fs::read(&store.path).await.unwrap(), before);
+		assert_eq!(store.get("game").await.leaderboards[0].entries.len(), 1);
+		store.submit("game", "0", "B", 20).await.unwrap();
+		assert_eq!(store.get("game").await.leaderboards[0].entries.len(), 2);
+		tokio::fs::remove_dir_all(test_root("locked-file")).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn concurrent_submissions_persist_without_lost_updates() {
+		let store = store("concurrent").await;
+		store.sync_slots("game", vec![SlotDefinition { name: "Score".into(), order: RankingOrder::HighScore, enabled: true }]).await.unwrap();
+		let mut tasks = Vec::new();
+		for score in 0..20 {
+			let store = store.clone();
+			tasks.push(tokio::spawn(async move { store.submit("game", "0", "A", score).await.unwrap() }));
+		}
+		for task in tasks { task.await.unwrap(); }
+		let reloaded = LeaderboardStore::load(&test_root("concurrent")).await.unwrap();
+		let data = reloaded.data.lock().await;
+		assert_eq!(data.games["game"][0].entries.len(), 20);
+		assert_eq!(data.games["game"][0].entries[0].score, 19.into());
+		tokio::fs::remove_dir_all(test_root("concurrent")).await.unwrap();
 	}
 
 	#[tokio::test]

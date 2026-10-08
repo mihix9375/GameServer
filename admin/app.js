@@ -1,5 +1,5 @@
 import { hasUnversionedChanges } from "./version-warning.mjs";
-import { bindFileDropzone, uploadFileBatch } from "./upload-files.mjs";
+import { bindFileDropzone, uploadFileBatch, createUploadFileRow } from "./upload-files.mjs";
 
 const state = {
   games: [],
@@ -189,9 +189,11 @@ function renderGames() {
     edit.addEventListener("click", () => openGameManager(game));
     const notify = document.createElement("button"); notify.className = "button secondary"; notify.textContent = "更新通知を送る";
     notify.addEventListener("click", () => sendNotification(gameId(game), notify));
+    const download = document.createElement("button"); download.className = "button secondary"; download.textContent = "全LauncherにDL";
+    download.addEventListener("click", () => requestClientDownloads(gameId(game), download));
     const remove = document.createElement("button"); remove.className = "button danger"; remove.textContent = "削除";
     remove.addEventListener("click", () => deleteGame(game, remove));
-    head.append(title, version); actions.append(edit, notify, remove); row.append(head, id, actions); list.append(row);
+    head.append(title, version); actions.append(edit, notify, download, remove); row.append(head, id, actions); list.append(row);
   }
 }
 
@@ -422,21 +424,61 @@ async function deleteGame(game, button) {
 let uploadFiles = [];
 let uploadBusy = false;
 
+function removeUploadFile(file) {
+  if (uploadBusy) return;
+  const rows = [...$("#upload-file-list").children];
+  const rowIndex = rows.findIndex(row => row.uploadFile === file);
+  if (rowIndex < 0) return;
+  // ファイル名ではなくオブジェクトで識別し、同名の別ZIPを巻き込まない。
+  uploadFiles = uploadFiles.filter(selected => selected !== file);
+  rows[rowIndex].remove();
+  $("#upload-summary").textContent = uploadFiles.length ? `${uploadFiles.length}件のZIPがアップロード対象です` : "アップロード対象のZIPはありません";
+  $("#start-upload").disabled = !uploadFiles.length;
+  if (!uploadFiles.length) $("#start-upload").textContent = "アップロードする";
+  $("#clear-upload-files").disabled = !$("#upload-file-list").children.length;
+  const remaining = $("#upload-file-list").children;
+  const focusRow = remaining[Math.min(rowIndex, remaining.length - 1)];
+  (focusRow?.querySelector(".upload-remove-file") || $("#upload-dropzone")).focus();
+}
+
+async function requestClientDownloads(id, button) {
+  const target = id ? (state.games.find((game) => gameId(game) === id)?.title || id) : "すべての配布ゲーム";
+  if (!window.confirm(`接続中の全Launcherに「${target}」のダウンロードを指示しますか？\n最新版はスキップします。未接続の端末には届きません。`)) return;
+  button.disabled = true;
+  try {
+    const result = await api(id ? `/api/downloads/${encodeURIComponent(id)}` : "/api/downloads", { method: "POST" });
+    toast(result.message); log(result.message);
+  } catch (error) { toast(error.message, true); log(`ダウンロード指示失敗: ${error.message}`); }
+  finally { button.disabled = false; }
+}
+
+$("#download-all-clients").addEventListener("click", (event) => requestClientDownloads(null, event.currentTarget));
+
+function clearUploadFiles() {
+  if (uploadBusy) return;
+  uploadFiles = [];
+  $("#upload-file-list").replaceChildren();
+  $("#upload-summary").textContent = "ZIPはまだ選択されていません";
+  $("#start-upload").disabled = true;
+  $("#start-upload").textContent = "アップロードする";
+  $("#clear-upload-files").disabled = true;
+  $("#upload-dropzone").focus();
+}
+
 function selectUploadFiles(files) {
   if (uploadBusy || !files.length) return;
   const invalid = files.filter(file => !file.name.toLowerCase().endsWith(".zip"));
   uploadFiles = files.filter(file => file.name.toLowerCase().endsWith(".zip"));
   if (invalid.length) toast(`ZIP以外の${invalid.length}件は選択されませんでした`, true);
   $("#upload-file-list").replaceChildren(...uploadFiles.map(file => {
-    const row = document.createElement("li");
-    const name = document.createElement("strong"); name.textContent = file.name;
-    const status = document.createElement("small"); status.textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · 待機中`;
-    row.append(name, status);
+    const row = createUploadFileRow(document, file, removeUploadFile, () => uploadBusy);
+    row.uploadFile = file;
     return row;
   }));
   $("#upload-summary").textContent = uploadFiles.length ? `${uploadFiles.length}件のZIPを選択しました` : "ZIPファイルを選択してください";
   $("#start-upload").disabled = !uploadFiles.length;
   $("#start-upload").textContent = "アップロードする";
+  $("#clear-upload-files").disabled = !uploadFiles.length;
 }
 
 async function uploadGames() {
@@ -446,6 +488,8 @@ async function uploadGames() {
   button.disabled = true;
   $("#close-upload").disabled = true;
   $("#game-upload-input").disabled = true;
+  $("#clear-upload-files").disabled = true;
+  $$("#upload-file-list .upload-remove-file").forEach(remove => { remove.disabled = true; });
   $("#upload-dropzone").setAttribute("aria-disabled", "true");
   const files = [...uploadFiles];
   try {
@@ -477,6 +521,8 @@ async function uploadGames() {
     button.textContent = uploadFiles.length ? "失敗したZIPを再試行" : "アップロードする";
     $("#close-upload").disabled = false;
     $("#game-upload-input").disabled = false;
+    $("#clear-upload-files").disabled = !$("#upload-file-list").children.length;
+    $$("#upload-file-list .upload-remove-file").forEach(remove => { remove.disabled = false; });
     $("#upload-dropzone").removeAttribute("aria-disabled");
   }
 }
@@ -555,6 +601,7 @@ $("#upload-game").addEventListener("click", () => {
   $("#upload-dropzone").focus();
 });
 $("#close-upload").addEventListener("click", closeUpload);
+$("#clear-upload-files").addEventListener("click", clearUploadFiles);
 $("#upload-modal").addEventListener("click", event => { if (event.target === $("#upload-modal")) closeUpload(); });
 $("#upload-modal").addEventListener("keydown", event => { if (event.key === "Escape") closeUpload(); });
 $("#start-upload").addEventListener("click", () => {

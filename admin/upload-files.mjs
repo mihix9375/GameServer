@@ -25,6 +25,26 @@ export function bindFileDropzone(zone, input, onFiles, isDisabled = () => false)
   });
 }
 
+// 名前表示と選択解除ボタン。解除はローカルの選択にだけ作用する。
+export function createUploadFileRow(document, file, onRemove, isDisabled = () => false) {
+  const row = document.createElement("li");
+  const heading = document.createElement("div"); heading.className = "upload-file-heading";
+  const name = document.createElement("strong"); name.textContent = file.name;
+  const remove = document.createElement("button");
+  remove.type = "button"; remove.className = "button secondary upload-remove-file";
+  remove.textContent = "選択から外す";
+  remove.setAttribute("aria-label", `${file.name}を選択から外す`);
+  remove.addEventListener("click", () => {
+    if (remove.disabled || isDisabled()) return;
+    onRemove(file);
+  });
+  heading.append(name, remove);
+  const status = document.createElement("small");
+  status.textContent = `${(file.size / 1024 / 1024).toFixed(1)} MB · 待機中`;
+  row.append(heading, status);
+  return row;
+}
+
 // 一つの失敗で残りのZIPを中断せず、各ファイルの結果を返す。
 export async function uploadFileBatch(files, upload, onStatus = () => {}) {
   const results = [];

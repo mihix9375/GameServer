@@ -142,6 +142,10 @@ h2 { margin-bottom: 0; font-size: 17px; }
 .upload-file-list { list-style: none; padding: 0; margin: 18px 0; display: grid; gap: 8px; }
 .upload-file-list li { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; overflow-wrap: anywhere; }
 .upload-file-list strong { color: #fff; font-size: 18px; line-height: 1.5; }
+.upload-file-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.upload-file-heading strong { min-width: 0; }
+.upload-remove-file { flex-shrink: 0; white-space: nowrap; }
+@media (max-width: 480px) { .upload-file-heading { flex-direction: column; } }
 .upload-file-list small { color: var(--muted); }
 .upload-file-list li[data-status="complete"] small { color: var(--green, #53d5a0); }
 .upload-file-list li[data-status="error"] small { color: var(--red); }
