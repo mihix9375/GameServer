@@ -24,6 +24,7 @@ mod leaderboards;
 mod score;
 mod client_metrics;
 mod logging;
+mod storage;
 
 use crate::src::spawn_monitor;
 

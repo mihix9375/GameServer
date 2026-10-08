@@ -17,12 +17,18 @@ pub type UpdateNoticeStream = ReceiverStream<Result<UpdateNotice, Status>>;
 
 pub fn upsert_notice(game_id: String, version: String) -> UpdateNotice
 {
-	UpdateNotice { game_id, version, action: UpdateAction::Upsert as i32 }
+	UpdateNotice { game_id, version, action: UpdateAction::Upsert as i32, downloads: Vec::new() }
 }
 
 pub fn delete_notice(game_id: String) -> UpdateNotice
 {
-	UpdateNotice { game_id, version: String::new(), action: UpdateAction::Delete as i32 }
+	UpdateNotice { game_id, version: String::new(), action: UpdateAction::Delete as i32, downloads: Vec::new() }
+}
+
+pub fn download_notice(downloads: Vec<crate::gamelauncher::DownloadRequest>) -> UpdateNotice
+{
+	// Empty game_id keeps older Launchers from interpreting this as an update.
+	UpdateNotice { action: UpdateAction::Download as i32, downloads, ..Default::default() }
 }
 
 fn removals_path() -> Result<PathBuf, String>

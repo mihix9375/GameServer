@@ -248,23 +248,35 @@ async fn update_leaderboards(
 	authorize(&state, &headers)?;
 	let clean_id = existing_game_id(&state, &game_id)?;
 	state.leaderboards.sync_slots(&clean_id, update.leaderboards).await
-		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error))?;
+		.map_err(|error| {
+			let status = match &error {
+				crate::leaderboards::LeaderboardError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+				crate::leaderboards::LeaderboardError::Invalid(_) => StatusCode::BAD_REQUEST,
+			};
+			api_error(status, error.to_string())
+		})?;
 	Ok(Json(ActionResponse { ok: true, message: format!("{clean_id}のランキング設定を保存しました") }))
 }
 
 async fn games(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult<Vec<Meta>>
 {
 	authorize(&state, &headers)?;
+	Ok(Json(read_published_games(&state).await?))
+}
+
+/// One catalog reader for listing, update notifications and download commands.
+async fn read_published_games(state: &AdminState) -> Result<Vec<Meta>, (StatusCode, Json<ActionResponse>)>
+{
 	let path = state.root.join("games").join("games.json");
 	let content = match tokio::fs::read_to_string(path).await
 	{
 		Ok(content) => content,
-		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Json(Vec::new())),
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
 		Err(error) => return Err(api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ゲーム一覧を読めません: {error}"))),
 	};
 	let games = serde_json::from_str(&content)
 		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("games.jsonが不正です: {error}")))?;
-	Ok(Json(games))
+	Ok(games)
 }
 
 async fn comments(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult<Vec<AdminComment>>
@@ -603,7 +615,7 @@ async fn delete_game(
 	crate::net::comments::delete_comments_for_game(&clean_id).await
 		.map_err(|message| api_error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
 	state.leaderboards.remove_game(&clean_id).await
-		.map_err(|message| api_error(StatusCode::INTERNAL_SERVER_ERROR, message))?;
+		.map_err(|message| api_error(StatusCode::INTERNAL_SERVER_ERROR, message.to_string()))?;
 	let root = state.root.clone();
 	let games = root.join("games");
 	tokio::task::spawn_blocking(move || crate::src::extract_games::extract_games(root, games)).await
@@ -628,11 +640,8 @@ async fn notify(
 	authorize(&state, &headers)?;
 	let clean_id = crate::net::normalize_game_id(&game_id)
 		.map_err(|error| api_error(StatusCode::BAD_REQUEST, error.message().to_string()))?;
-	let path = state.root.join("games").join("games.json");
-	let content = tokio::fs::read_to_string(path).await
-		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("ゲーム一覧を読めません: {error}")))?;
-	let games: Vec<Meta> = serde_json::from_str(&content)
-		.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("games.jsonが不正です: {error}")))?;
+	let _operation = state.operation_lock.lock().await;
+	let games = read_published_games(&state).await?;
 	let game = games.into_iter().find(|game| {
 		crate::net::normalize_game_id(if game.id.is_empty() { &game.game } else { &game.id })
 			.ok().as_deref() == Some(clean_id.as_str())
@@ -645,6 +654,46 @@ async fn notify(
 		ok: true,
 		message: format!("{clean_id} v{} の更新通知を送信しました（受信: {receivers}）", game.version),
 	}))
+}
+
+async fn request_downloads(
+	state: AdminState,
+	headers: HeaderMap,
+	game_id: Option<String>,
+) -> ApiResult<ActionResponse>
+{
+	authorize(&state, &headers)?;
+	let selected = game_id.map(|id| crate::net::normalize_game_id(&id))
+		.transpose().map_err(|error| api_error(StatusCode::BAD_REQUEST, error.message().to_string()))?;
+	let _operation = state.operation_lock.lock().await;
+	let games = read_published_games(&state).await?;
+	let mut downloads = Vec::new();
+	for game in games {
+		let id = crate::net::normalize_game_id(if game.id.is_empty() { &game.game } else { &game.id })
+			.map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.message().to_string()))?;
+		if selected.as_ref().is_none_or(|selected| selected == &id) {
+			downloads.push(crate::gamelauncher::DownloadRequest { game_id: id, version: game.version });
+		}
+	}
+	if downloads.is_empty() {
+		return Err(api_error(StatusCode::NOT_FOUND, "対象の配布ゲームがありません"));
+	}
+	let count = downloads.len();
+	// One broadcast for the entire batch avoids overflowing the stream with many notices.
+	let receivers = state.updates.send(crate::net::update_notice::download_notice(downloads))
+		.map_err(|_| api_error(StatusCode::CONFLICT, "接続中のLauncherがありません。接続後に再実行してください"))?;
+	Ok(Json(ActionResponse {
+		ok: true,
+		message: format!("{count}ゲームのダウンロード指示を送信しました（接続: {receivers}）。完了通知ではありません"),
+	}))
+}
+
+async fn download_all(State(state): State<AdminState>, headers: HeaderMap) -> ApiResult<ActionResponse> {
+	request_downloads(state, headers, None).await
+}
+
+async fn download_one(State(state): State<AdminState>, headers: HeaderMap, AxumPath(id): AxumPath<String>) -> ApiResult<ActionResponse> {
+	request_downloads(state, headers, Some(id)).await
 }
 
 pub async fn serve(
@@ -691,6 +740,8 @@ pub async fn serve(
 		.route("/api/comments/{comment_id}", delete(remove_comment))
 		.route("/api/rescan", post(rescan))
 		.route("/api/notify/{game_id}", post(notify))
+		.route("/api/downloads", post(download_all))
+		.route("/api/downloads/{game_id}", post(download_one))
 		.with_state(state);
 	let listener = tokio::net::TcpListener::bind(address).await
 		.map_err(|error| format!("管理画面を{}で起動できません: {error}", config.bind))?;
@@ -721,6 +772,41 @@ mod tests
 		}
 		archive.finish().unwrap();
 		path
+	}
+
+	#[tokio::test]
+	async fn download_commands_are_authorized_targeted_and_batched() {
+		let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+		let root = std::env::temp_dir().join(format!("gameserver-download-command-{}-{stamp}", std::process::id()));
+		std::fs::create_dir_all(root.join("games")).unwrap();
+		let games: Vec<serde_json::Value> = (0..150).map(|i| serde_json::json!({
+			"id": format!("game{i}"), "game": "Game.exe", "version": "1.2.3"
+		})).collect();
+		std::fs::write(root.join("games/games.json"), serde_json::to_vec(&games).unwrap()).unwrap();
+		let (updates, mut receiver) = broadcast::channel(2);
+		let state = AdminState {
+			root: root.clone(), bind: String::new(), leaderboard_bind: String::new(), token: "secret".into(),
+			started_at: Instant::now(), updates: Arc::new(updates), operation_lock: Arc::new(Mutex::new(())),
+			leaderboards: crate::leaderboards::LeaderboardStore::load(&root).await.unwrap(),
+		};
+		assert_eq!(request_downloads(state.clone(), HeaderMap::new(), None).await.err().unwrap().0, StatusCode::UNAUTHORIZED);
+		assert!(receiver.try_recv().is_err());
+		let mut headers = HeaderMap::new();
+		headers.insert(header::AUTHORIZATION, "Bearer secret".parse().unwrap());
+		assert!(request_downloads(state.clone(), headers.clone(), Some("game7".into())).await.is_ok());
+		let notice = receiver.recv().await.unwrap();
+		assert_eq!(notice.action, crate::gamelauncher::UpdateAction::Download as i32);
+		assert!(notice.game_id.is_empty());
+		assert_eq!(notice.downloads.len(), 1);
+		assert_eq!(notice.downloads[0].game_id, "game7");
+		assert_eq!(notice.downloads[0].version, "1.2.3");
+		assert!(request_downloads(state.clone(), headers.clone(), None).await.is_ok());
+		assert_eq!(receiver.recv().await.unwrap().downloads.len(), 150);
+		assert!(receiver.try_recv().is_err());
+		assert_eq!(request_downloads(state.clone(), headers.clone(), Some("absent".into())).await.err().unwrap().0, StatusCode::NOT_FOUND);
+		drop(receiver);
+		assert_eq!(request_downloads(state, headers, None).await.err().unwrap().0, StatusCode::CONFLICT);
+		std::fs::remove_dir_all(root).unwrap();
 	}
 
 	#[test]

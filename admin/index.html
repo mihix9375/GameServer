@@ -29,6 +29,7 @@
         <div><p class="eyebrow">ADMINISTRATION</p><h1 id="page-title">ダッシュボード</h1></div>
         <div class="top-actions">
           <button id="upload-game" class="button secondary">ZIPをアップロード</button>
+          <button id="download-all-clients" class="button secondary">全Launcherに一括DL</button>
           <button id="refresh-all" class="button secondary">再読込</button>
           <button id="rescan" class="button primary">ゲームを再スキャン</button>
         </div>
@@ -108,7 +109,7 @@
       <input id="game-upload-input" type="file" accept=".zip,application/zip" multiple hidden>
       <ul id="upload-file-list" class="upload-file-list" aria-label="選択したZIP"></ul>
       <p id="upload-summary" class="form-note" role="status" aria-live="polite">ZIPはまだ選択されていません</p>
-      <div class="dialog-actions"><button id="start-upload" class="button primary" type="button" disabled>アップロードする</button></div>
+      <div class="dialog-actions"><button id="clear-upload-files" class="button secondary" type="button" disabled>すべて選択解除</button><button id="start-upload" class="button primary" type="button" disabled>アップロードする</button></div>
     </div>
   </div>
   <div id="game-modal" class="dialog hidden">

@@ -148,7 +148,12 @@ fn write_games_json(games_dir: &Path)
 		}
 	}
 	all_metas.sort_by(|a, b| a.id.cmp(&b.id));
-	if let Ok(json_array) = serde_json::to_string_pretty(&all_metas) { let _ = fs::write(games_dir.join("games.json"), &json_array); }
+	if let Ok(json_array) = serde_json::to_vec_pretty(&all_metas) {
+		// Readers must never see half-written JSON while the monitor refreshes the catalog.
+		if let Err(error) = crate::storage::write_atomic(&games_dir.join("games.json"), &json_array) {
+			tracing::warn!("ゲーム一覧を保存できません: {error}");
+		}
+	}
 }
 
 pub fn extract_games(root: PathBuf, games: PathBuf)
@@ -210,7 +215,12 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 				if let Ok(pretty_json) = serde_json::to_string_pretty(&meta)
 				{
 					let dst_zip = game_dir.join(format!("{}.zip", meta.id));
-					let _ = update_zip_with_new_meta(&path, &dst_zip, &pretty_json);
+					if let Err(error) = update_zip_with_new_meta(&path, &dst_zip, &pretty_json) {
+						// Keep the original upload so a failed import can be retried.
+						tracing::warn!("ZIPを保存できません ({}): {error}", meta.id);
+						let _ = fs::remove_dir_all(&temp_extract_dir);
+						continue;
+					}
 					let _ = fs::remove_file(&path);
 					let _ = fs::write(game_dir.join("meta.json"), pretty_json);
 				}
@@ -224,6 +234,26 @@ pub fn extract_games(root: PathBuf, games: PathBuf)
 #[cfg(test)]
 mod tests
 {
+	#[test]
+	fn failed_zip_import_preserves_original_upload() {
+		use std::io::Write;
+		let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+		let root = std::env::temp_dir().join(format!("gameserver-import-retry-{}-{stamp}", std::process::id()));
+		let games = root.join("games");
+		std::fs::create_dir_all(root.join("temp")).unwrap();
+		// A directory occupying the ZIP destination forces the save to fail.
+		std::fs::create_dir_all(games.join("retry/retry.zip")).unwrap();
+		let source = root.join("temp/upload.zip");
+		let mut archive = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+		archive.start_file("meta.json", zip::write::SimpleFileOptions::default()).unwrap();
+		archive.write_all(br#"{"id":"retry","game":"Game.exe","version":"1"}"#).unwrap();
+		archive.start_file("Game.exe", zip::write::SimpleFileOptions::default()).unwrap();
+		archive.write_all(b"fixture").unwrap(); archive.finish().unwrap();
+		let original = std::fs::read(&source).unwrap();
+		super::extract_games(root.clone(), games);
+		assert_eq!(std::fs::read(&source).unwrap(), original);
+		std::fs::remove_dir_all(root).unwrap();
+	}
 	use super::*;
 	use std::io::Write;
 	use std::time::{SystemTime, UNIX_EPOCH};

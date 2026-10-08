@@ -1,5 +1,4 @@
 use std::env;
-use std::fs;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use crate::gamelauncher::UpdateNotice;
@@ -26,9 +25,14 @@ pub fn spawn_monitor() -> Arc<broadcast::Sender<UpdateNotice>>
 	tokio::spawn(async move {
 		loop
 		{
-			extract_games::extract_games(monitor_root.clone(), monitor_games.clone());
+			// ZIP scanning/extraction is blocking; keep it off the network runtime workers.
+			let root = monitor_root.clone();
+			let games = monitor_games.clone();
+			if let Err(error) = tokio::task::spawn_blocking(move || extract_games::extract_games(root, games)).await {
+				tracing::error!("ゲーム監視処理に失敗: {error}");
+			}
 
-			if let Ok(content) = fs::read_to_string(&games_list_path)
+			if let Ok(content) = tokio::fs::read_to_string(&games_list_path).await
 			{
 				if let Ok(meta) = serde_json::from_str::<Vec<Meta>>(&content)
 				{
